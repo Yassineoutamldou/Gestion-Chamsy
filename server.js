@@ -87,6 +87,54 @@ const initDB = () => {
 
 initDB();
 
+// --- CACHE TOKEN SENDIT ---
+let cachedSenditToken = null;
+let tokenExpiresAt = 0;
+
+const getSenditToken = async (forceRefresh = false) => {
+  if (!SENDIT_PUBLIC_KEY || !SENDIT_SECRET_KEY) {
+    throw new Error("Clés Sendit manquantes dans les variables d'environnement (SENDIT_PUBLIC_KEY / SENDIT_SECRET_KEY)");
+  }
+
+  const now = Date.now();
+  if (!forceRefresh && cachedSenditToken && now < tokenExpiresAt) {
+    return cachedSenditToken;
+  }
+
+  const response = await fetch(`${SENDIT_API_BASE}/login`, {
+    method: 'POST',
+    headers: {
+      'Accept': 'application/json',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      public_key: SENDIT_PUBLIC_KEY,
+      secret_key: SENDIT_SECRET_KEY
+    })
+  });
+
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`Erreur authentification Sendit (${response.status}): ${errText}`);
+  }
+
+  const data = await response.json();
+  const token =
+    data?.token ||
+    data?.access_token ||
+    data?.data?.token ||
+    data?.data?.access_token ||
+    '';
+
+  if (!token) {
+    throw new Error("Jeton introuvable dans la réponse de POST /login Sendit");
+  }
+
+  cachedSenditToken = token;
+  tokenExpiresAt = now + 50 * 60 * 1000; // renouvellement toutes les 50 minutes
+  return cachedSenditToken;
+};
+
 const mapSenditStatus = (rawStatus = '') => {
   const s = String(rawStatus).toLowerCase().trim();
   if (s.includes('deliv') || s.includes('livré') || s.includes('livre') || s === 'dd') {
@@ -99,19 +147,28 @@ const mapSenditStatus = (rawStatus = '') => {
 };
 
 const fetchSenditParcels = async () => {
-  if (!SENDIT_PUBLIC_KEY || !SENDIT_SECRET_KEY) {
-    throw new Error("Clés Sendit manquantes dans les variables d'environnement (SENDIT_PUBLIC_KEY / SENDIT_SECRET_KEY)");
-  }
+  let token = await getSenditToken(false);
 
-  const response = await fetch(`${SENDIT_API_BASE}/deliveries`, {
+  let response = await fetch(`${SENDIT_API_BASE}/deliveries`, {
     method: 'GET',
     headers: {
       'Accept': 'application/json',
       'Content-Type': 'application/json',
-      'X-Public-Key': SENDIT_PUBLIC_KEY,
-      'X-Secret-Key': SENDIT_SECRET_KEY
+      'Authorization': `Bearer ${token}`
     }
   });
+
+  if (response.status === 401 || response.status === 403) {
+    token = await getSenditToken(true);
+    response = await fetch(`${SENDIT_API_BASE}/deliveries`, {
+      method: 'GET',
+      headers: {
+        'Accept': 'application/json',
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`
+      }
+    });
+  }
 
   if (!response.ok) {
     const errText = await response.text();
@@ -133,7 +190,7 @@ const syncSenditStatuses = async () => {
   const stmt = db.prepare(`
     UPDATE products
     SET statut_livraison = ?
-    WHERE tracking_code = ? AND category != 'Magasin' AND statut_livraison != ?
+    WHERE tracking_code = ? AND category = 'Foulard' AND statut_livraison != ?
   `);
 
   for (const parcel of parcels) {
@@ -152,9 +209,10 @@ const syncSenditStatuses = async () => {
     }
   }
 
-  return { totalParcels: parcels.length, updatedCount };
+  return { targetCategory: 'Foulard', totalParcels: parcels.length, updatedCount };
 };
 
+// --- ROUTES SYNC SENDIT ---
 app.post('/api/sync-sendit', async (req, res) => {
   try {
     const result = await syncSenditStatuses();
@@ -173,6 +231,7 @@ app.get('/api/sync-sendit', async (req, res) => {
   }
 });
 
+// --- WEBHOOK SENDIT (catégorie Foulard) ---
 app.post('/api/webhook/sendit', (req, res) => {
   try {
     const payload = req.body || {};
@@ -188,7 +247,7 @@ app.post('/api/webhook/sendit', (req, res) => {
       db.prepare(`
         UPDATE products
         SET statut_livraison = ?
-        WHERE tracking_code = ? AND category != 'Magasin'
+        WHERE tracking_code = ? AND category = 'Foulard'
       `).run(mappedStatus, code);
     }
 
