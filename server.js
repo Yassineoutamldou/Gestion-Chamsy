@@ -48,7 +48,7 @@ const initDB = () => {
         prix_vente REAL DEFAULT 0,
         frais_livraison_unit REAL DEFAULT 35,
         statut TEXT DEFAULT 'En attente',
-        statut_livraison TEXT DEFAULT 'En cours',
+        statut_livraison TEXT DEFAULT 'En attente',
         source_sendit INTEGER DEFAULT 0,
         date_saisie TEXT
       );
@@ -86,7 +86,7 @@ const initDB = () => {
       "ALTER TABLE products ADD COLUMN sold_count INTEGER DEFAULT 0",
       "ALTER TABLE products ADD COLUMN frais_livraison_unit REAL DEFAULT 35",
       "ALTER TABLE products ADD COLUMN statut TEXT DEFAULT 'En attente'",
-      "ALTER TABLE products ADD COLUMN statut_livraison TEXT DEFAULT 'En cours'",
+      "ALTER TABLE products ADD COLUMN statut_livraison TEXT DEFAULT 'En attente'",
       "ALTER TABLE products ADD COLUMN source_sendit INTEGER DEFAULT 0",
       "ALTER TABLE products ADD COLUMN date_saisie TEXT",
       "ALTER TABLE purchases ADD COLUMN status TEXT DEFAULT 'Payé'"
@@ -178,26 +178,46 @@ const computeDeliveryFee = (city = '', districtName = '', senditFee = null) => {
 
 const mapSenditStatus = (rawStatus = '') => {
   const s = String(rawStatus).toLowerCase().trim();
+
   if (
+    s === 'delivered' ||
+    s === 'livre' ||
+    s === 'livré' ||
+    s === 'dd' ||
     s.includes('deliv') ||
     s.includes('livré') ||
-    s.includes('livre') ||
-    s === 'dd' ||
-    s === 'delivered'
+    s.includes('livre')
   ) {
     return 'Livré';
   }
+
   if (
-    s.includes('refus') ||
-    s.includes('return') ||
-    s.includes('retour') ||
-    s.includes('annul') ||
+    s === 'refused' ||
+    s === 'refuse' ||
+    s === 'refusé' ||
+    s === 'returned' ||
+    s === 'return' ||
+    s === 'retour' ||
     s === 'rt' ||
-    s === 'refused'
+    s.includes('refus') ||
+    s.includes('retour') ||
+    s.includes('return')
   ) {
     return 'Refusé';
   }
-  return rawStatus ? String(rawStatus).toUpperCase() : 'En cours';
+
+  if (
+    s === 'canceled' ||
+    s === 'cancelled' ||
+    s === 'annule' ||
+    s === 'annulé' ||
+    s.includes('cancel') ||
+    s.includes('annul')
+  ) {
+    return 'Annulé';
+  }
+
+  return 'En attente';
 };
 
 const extractParcelDate = (parcel) => {
@@ -219,36 +239,7 @@ const isSinceNov1_2026 = (parcel) => {
   return dt >= START_DATE_NOV_2026;
 };
 
-const fetchSenditDeliveries = async () => {
-  let token = await getSenditToken(false);
-
-  let res = await fetch(`${SENDIT_API_BASE}/deliveries`, {
-    method: 'GET',
-    headers: {
-      Accept: 'application/json',
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${token}`
-    }
-  });
-
-  if (res.status === 401 || res.status === 403) {
-    token = await getSenditToken(true);
-    res = await fetch(`${SENDIT_API_BASE}/deliveries`, {
-      method: 'GET',
-      headers: {
-        Accept: 'application/json',
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}`
-      }
-    });
-  }
-
-  if (!res.ok) {
-    const errText = await res.text();
-    throw new Error(`Erreur GET /deliveries Sendit (${res.status}): ${errText}`);
-  }
-
-  const json = await res.json();
+const extractListFromResponse = (json) => {
   if (Array.isArray(json)) return json;
   if (Array.isArray(json?.data)) return json.data;
   if (Array.isArray(json?.data?.data)) return json.data.data;
@@ -257,8 +248,61 @@ const fetchSenditDeliveries = async () => {
   return [];
 };
 
+const fetchSenditDeliveriesAllPages = async () => {
+  let token = await getSenditToken(false);
+  const allItems = [];
+  const seenCodes = new Set();
+
+  for (let page = 1; page <= 20; page += 1) {
+    let res = await fetch(`${SENDIT_API_BASE}/deliveries?page=${page}`, {
+      method: 'GET',
+      headers: {
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`
+      }
+    });
+
+    if (res.status === 401 || res.status === 403) {
+      token = await getSenditToken(true);
+      res = await fetch(`${SENDIT_API_BASE}/deliveries?page=${page}`, {
+        method: 'GET',
+        headers: {
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`
+        }
+      });
+    }
+
+    if (!res.ok) {
+      const errText = await res.text();
+      throw new Error(`Erreur GET /deliveries Sendit (${res.status}): ${errText}`);
+    }
+
+    const json = await res.json();
+    const list = extractListFromResponse(json);
+    if (!list.length) break;
+
+    let addedInPage = 0;
+    for (const item of list) {
+      const code = String(item.code || item.tracking_code || item.reference || '').trim();
+      const uniqueKey = code || JSON.stringify(item);
+      if (!seenCodes.has(uniqueKey)) {
+        seenCodes.add(uniqueKey);
+        allItems.push(item);
+        addedInPage += 1;
+      }
+    }
+
+    if (addedInPage === 0) break;
+  }
+
+  return allItems;
+};
+
 const syncFoulardFromSendit = async () => {
-  const allParcels = await fetchSenditDeliveries();
+  const allParcels = await fetchSenditDeliveriesAllPages();
   const novParcels = allParcels.filter(isSinceNov1_2026);
 
   let insertedCount = 0;
@@ -426,8 +470,8 @@ app.post('/api/products', (req, res) => {
       Number(prix_achat) || 0,
       Number(prix_vente) || 0,
       isMagasin ? 0 : (Number(frais_livraison_unit) ?? 35),
-      statut || 'Confirmé',
-      statut_livraison || 'Livré',
+      statut || 'En attente',
+      statut_livraison || 'En attente',
       date_saisie || new Date().toISOString().slice(0, 10)
     );
     res.json({ success: true, id: info.lastInsertRowid });
@@ -469,8 +513,8 @@ app.put('/api/products/:id', (req, res) => {
       Number(prix_achat) || 0,
       Number(prix_vente) || 0,
       isMagasin ? 0 : (Number(frais_livraison_unit) ?? 35),
-      statut || 'Confirmé',
-      statut_livraison || 'Livré',
+      statut || 'En attente',
+      statut_livraison || 'En attente',
       date_saisie || new Date().toISOString().slice(0, 10),
       id
     );
@@ -584,14 +628,14 @@ app.post('/api/inventories', (req, res) => {
   }
 });
 
-// --- AUTO SYNC EVERY 1 HOUR (1H) ---
-const ONE_HOUR_MS = 60 * 60 * 1000;
+// --- AUTO SYNC EVERY 20 MINUTES ---
+const TWENTY_MINUTES_MS = 20 * 60 * 1000;
 setInterval(() => {
   const { publicKey, secretKey } = getFoulardCredentials();
   if (!publicKey || !secretKey) return;
   syncFoulardFromSendit()
-    .then((res) => console.log('Sendit Foulard auto-sync (1H):', res))
+    .then((res) => console.log('Sendit Foulard auto-sync (20min):', res))
     .catch((err) => console.log('Sendit Foulard auto-sync error:', err.message));
-}, ONE_HOUR_MS);
+}, TWENTY_MINUTES_MS);
 
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
