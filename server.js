@@ -176,42 +176,67 @@ const computeDeliveryFee = (city = '', districtName = '', senditFee = null) => {
   return 35;
 };
 
-const computeAutoBuyPrice = (salePrice = 0, currentBuyPrice = 0) => {
-  const existingBuy = Number(currentBuyPrice) || 0;
-  if (existingBuy > 0) return existingBuy;
+const norm = (val = '') =>
+  String(val)
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[_-]+/g, ' ')
+    .trim();
 
-  const p = Number(salePrice) || 0;
-  if (p === 219 || p === 220) return 84;
-  if (p === 279 || p === 280) return 112;
-  if (p === 329 || p === 330) return 140;
-  if (p === 379 || p === 380) return 168;
-  return 0;
+const extractRawSenditStatus = (parcel = {}) => {
+  const candidates = [
+    parcel.status,
+    parcel.etat,
+    parcel.state,
+    parcel.situation,
+    parcel.last_status,
+    parcel.status_label,
+    parcel.status_name,
+    parcel.delivery_status,
+    parcel.parcel_status,
+    parcel.status?.name,
+    parcel.status?.label,
+    parcel.etat?.name
+  ];
+
+  for (const c of candidates) {
+    if (typeof c === 'string' && c.trim()) return c.trim();
+    if (c && typeof c === 'object') {
+      const nested = c.name || c.label || c.title || c.slug || c.code || '';
+      if (String(nested).trim()) return String(nested).trim();
+    }
+  }
+  return '';
 };
 
-const mapSenditStatus = (rawStatus = '') => {
-  const s = String(rawStatus).toLowerCase().trim();
+const mapSenditStatus = (parcelOrRaw = '') => {
+  const rawStatus =
+    typeof parcelOrRaw === 'object' && parcelOrRaw !== null
+      ? extractRawSenditStatus(parcelOrRaw)
+      : String(parcelOrRaw || '');
+
+  const s = norm(rawStatus);
+  if (!s) return 'En cours de livraison';
 
   if (
+    s === 'dd' ||
     s === 'delivered' ||
     s === 'livre' ||
-    s === 'livré' ||
-    s === 'dd' ||
     s.includes('deliv') ||
-    s.includes('livré') ||
-    s.includes('livre')
+    s.includes('livre') ||
+    s.includes('rembours')
   ) {
     return 'Livré';
   }
 
   if (
+    s === 'rt' ||
     s === 'refused' ||
     s === 'rejected' ||
     s === 'refuse' ||
-    s === 'refusé' ||
     s === 'returned' ||
     s === 'return' ||
-    s === 'retour' ||
-    s === 'rt' ||
     s.includes('refus') ||
     s.includes('reject') ||
     s.includes('retour') ||
@@ -224,7 +249,6 @@ const mapSenditStatus = (rawStatus = '') => {
     s === 'canceled' ||
     s === 'cancelled' ||
     s === 'annule' ||
-    s === 'annulé' ||
     s.includes('cancel') ||
     s.includes('annul')
   ) {
@@ -237,8 +261,7 @@ const mapSenditStatus = (rawStatus = '') => {
     s === 'created' ||
     s === 'draft' ||
     s === 'attente' ||
-    s.includes('attente') ||
-    s.includes('pending')
+    s === 'en attente'
   ) {
     return 'En attente';
   }
@@ -348,7 +371,7 @@ const syncFoulardFromSendit = async () => {
 
   const updateRow = db.prepare(`
     UPDATE products
-    SET client = ?, city = ?, prix_achat = ?, prix_vente = ?, frais_livraison_unit = ?, statut_livraison = ?, source_sendit = 1, date_saisie = ?
+    SET client = ?, city = ?, prix_vente = ?, frais_livraison_unit = ?, statut_livraison = ?, source_sendit = 1, date_saisie = ?
     WHERE id = ?
   `);
 
@@ -363,7 +386,7 @@ const syncFoulardFromSendit = async () => {
     const clientStr = String(p.name || p.client || p.phone || code).trim();
     const salePrice = Number(p.amount ?? p.price ?? 0) || 0;
     const fee = computeDeliveryFee(cityStr, districtStr, p.fee);
-    const statusLabel = mapSenditStatus(p.status || p.etat || '');
+    const statusLabel = mapSenditStatus(p);
 
     const dt = extractParcelDate(p);
     const dateStr = dt
@@ -372,13 +395,12 @@ const syncFoulardFromSendit = async () => {
 
     const existing = findRow.get(code, 'Foulard');
     if (!existing) {
-      const autoBuy = computeAutoBuyPrice(salePrice, 0);
       insertRow.run(
         `Colis ${code}`,
         clientStr,
         displayCity,
         code,
-        autoBuy,
+        0,
         salePrice,
         fee,
         statusLabel,
@@ -387,11 +409,9 @@ const syncFoulardFromSendit = async () => {
       );
       insertedCount += 1;
     } else {
-      const resolvedBuy = computeAutoBuyPrice(salePrice, existing.prix_achat);
       const hasChanged =
         existing.client !== clientStr ||
         existing.city !== displayCity ||
-        Number(existing.prix_achat) !== resolvedBuy ||
         Number(existing.prix_vente) !== salePrice ||
         Number(existing.frais_livraison_unit) !== fee ||
         existing.statut_livraison !== statusLabel ||
@@ -401,7 +421,6 @@ const syncFoulardFromSendit = async () => {
         updateRow.run(
           clientStr,
           displayCity,
-          resolvedBuy,
           salePrice,
           fee,
           statusLabel,
@@ -423,6 +442,7 @@ const syncFoulardFromSendit = async () => {
   };
 };
 
+// --- ROUTES SYNC SENDIT (Foulard uniquement) ---
 const handleSyncFoulard = async (req, res) => {
   try {
     const result = await syncFoulardFromSendit();
@@ -435,12 +455,13 @@ const handleSyncFoulard = async (req, res) => {
 app.post('/api/sync-sendit', handleSyncFoulard);
 app.get('/api/sync-sendit', handleSyncFoulard);
 
+// --- WEBHOOK SENDIT (Foulard) ---
 app.post('/api/webhook/sendit', (req, res) => {
   try {
     const payload = req.body || {};
     const p = payload.data || payload.parcel || payload.delivery || payload;
     const code = String(p.code || p.tracking_code || p.reference || '').trim();
-    const statusLabel = mapSenditStatus(p.status || p.etat || '');
+    const statusLabel = mapSenditStatus(p);
 
     if (code && statusLabel) {
       db.prepare(`
@@ -490,12 +511,6 @@ app.post('/api/products', (req, res) => {
 
   try {
     const isMagasin = category === 'Magasin';
-    const saleVal = Number(prix_vente) || 0;
-    const buyVal =
-      prix_achat !== '' && prix_achat !== undefined && prix_achat !== null
-        ? Number(prix_achat) || 0
-        : computeAutoBuyPrice(saleVal, 0);
-
     const info = db.prepare(`
       INSERT INTO products
       (name, client, city, tracking_code, category, stock, sold_count, prix_achat, prix_vente, frais_livraison_unit, statut, statut_livraison, date_saisie)
@@ -507,11 +522,11 @@ app.post('/api/products', (req, res) => {
       tracking_code || '',
       category || 'Foulard',
       Number(stock) || 1,
-      buyVal,
-      saleVal,
+      Number(prix_achat) || 0,
+      Number(prix_vente) || 0,
       isMagasin ? 0 : (Number(frais_livraison_unit) ?? 35),
       statut || 'En attente',
-      statut_livraison || (isMagasin ? 'Livré' : 'En attente'),
+      statut_livraison || (isMagasin ? 'Livré' : 'En cours de livraison'),
       date_saisie || new Date().toISOString().slice(0, 10)
     );
     res.json({ success: true, id: info.lastInsertRowid });
@@ -554,7 +569,7 @@ app.put('/api/products/:id', (req, res) => {
       Number(prix_vente) || 0,
       isMagasin ? 0 : (Number(frais_livraison_unit) ?? 35),
       statut || 'En attente',
-      statut_livraison || (isMagasin ? 'Livré' : 'En attente'),
+      statut_livraison || (isMagasin ? 'Livré' : 'En cours de livraison'),
       date_saisie || new Date().toISOString().slice(0, 10),
       id
     );
