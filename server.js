@@ -218,19 +218,18 @@ const mapSenditStatus = (rawStatus = '') => {
   }
 
   if (
-    s.includes('transit') ||
-    s.includes('shipping') ||
-    s.includes('cours') ||
-    s.includes('distribution') ||
-    s.includes('ramass') ||
-    s.includes('expedi') ||
-    s.includes('in_delivery') ||
-    s.includes('out_for_delivery')
+    s === 'pending' ||
+    s === 'new' ||
+    s === 'created' ||
+    s === 'draft' ||
+    s === 'attente' ||
+    s.includes('attente') ||
+    s.includes('pending')
   ) {
-    return 'En cours de livraison';
+    return 'En attente';
   }
 
-  return 'En attente';
+  return 'En cours de livraison';
 };
 
 const extractParcelDate = (parcel) => {
@@ -440,13 +439,15 @@ app.post('/api/webhook/sendit', (req, res) => {
   }
 });
 
-// --- API PRODUCTS ---
+// --- API PRODUCTS (La date jdida l-foq, w 01/11/2026 l-t-ḥ-t) ---
 app.get('/api/products', (req, res) => {
   const { category } = req.query;
   try {
     const rows = category
-      ? db.prepare('SELECT * FROM products WHERE category = ? ORDER BY id DESC').all(category)
-      : db.prepare('SELECT * FROM products ORDER BY id DESC').all();
+      ? db
+          .prepare('SELECT * FROM products WHERE category = ? ORDER BY date_saisie DESC, id DESC')
+          .all(category)
+      : db.prepare('SELECT * FROM products ORDER BY date_saisie DESC, id DESC').all();
     res.json(Array.isArray(rows) ? rows : []);
   } catch (err) {
     console.error('Erreur GET /api/products:', err.message);
