@@ -217,6 +217,19 @@ const mapSenditStatus = (rawStatus = '') => {
     return 'Annulé';
   }
 
+  if (
+    s.includes('transit') ||
+    s.includes('shipping') ||
+    s.includes('cours') ||
+    s.includes('distribution') ||
+    s.includes('ramass') ||
+    s.includes('expedi') ||
+    s.includes('in_delivery') ||
+    s.includes('out_for_delivery')
+  ) {
+    return 'En cours de livraison';
+  }
+
   return 'En attente';
 };
 
@@ -425,13 +438,19 @@ app.post('/api/webhook/sendit', (req, res) => {
   }
 });
 
-// --- API PRODUCTS ---
+// --- API PRODUCTS (Trié du plus ancien en bas au plus récent en haut) ---
 app.get('/api/products', (req, res) => {
   const { category } = req.query;
   try {
     const rows = category
-      ? db.prepare('SELECT * FROM products WHERE category = ? ORDER BY id DESC').all(category)
-      : db.prepare('SELECT * FROM products ORDER BY id DESC').all();
+      ? db
+          .prepare(
+            'SELECT * FROM products WHERE category = ? ORDER BY COALESCE(date_saisie, "") ASC, id ASC'
+          )
+          .all(category)
+      : db
+          .prepare('SELECT * FROM products ORDER BY COALESCE(date_saisie, "") ASC, id ASC')
+          .all();
     res.json(rows);
   } catch (err) {
     res.status(500).json({ error: err.message });
