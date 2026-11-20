@@ -106,23 +106,51 @@ const initDB = () => {
 
 initDB();
 
-const getFoulardCredentials = () => ({
-  publicKey: process.env.SENDIT_FOULARD_PUBLIC_KEY || process.env.SENDIT_PUBLIC_KEY || '',
-  secretKey: process.env.SENDIT_FOULARD_SECRET_KEY || process.env.SENDIT_SECRET_KEY || ''
-});
+const normalizeCategoryKey = (category = 'Foulard') => {
+  const c = String(category)
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim();
+  if (c.includes('vetement')) return 'Vêtement';
+  return 'Foulard';
+};
 
-let cachedToken = null;
-let tokenExpiresAt = 0;
+const getSenditCredentialsForCategory = (category = 'Foulard') => {
+  const canonical = normalizeCategoryKey(category);
 
-const getSenditToken = async (forceRefresh = false) => {
-  const { publicKey, secretKey } = getFoulardCredentials();
+  if (canonical === 'Vêtement') {
+    return {
+      canonicalCategory: 'Vêtement',
+      publicKey:
+        process.env.SENDIT_VETEMENT_PUBLIC_KEY || 'fcba9e7929e7637a84d3f1afc1a46c6a',
+      secretKey:
+        process.env.SENDIT_VETEMENT_SECRET_KEY || '2f1KbGsOR5jknEJv1vulvevOxztLNJi0'
+    };
+  }
+
+  return {
+    canonicalCategory: 'Foulard',
+    publicKey: process.env.SENDIT_FOULARD_PUBLIC_KEY || process.env.SENDIT_PUBLIC_KEY || '',
+    secretKey: process.env.SENDIT_FOULARD_SECRET_KEY || process.env.SENDIT_SECRET_KEY || ''
+  };
+};
+
+const tokenCache = {
+  Foulard: { token: null, expiresAt: 0 },
+  Vêtement: { token: null, expiresAt: 0 }
+};
+
+const getSenditToken = async (category = 'Foulard', forceRefresh = false) => {
+  const { canonicalCategory, publicKey, secretKey } = getSenditCredentialsForCategory(category);
   if (!publicKey || !secretKey) {
-    throw new Error('Clés Sendit Foulard manquantes dans les variables d’environnement');
+    throw new Error(`Clés Sendit ${canonicalCategory} manquantes dans les variables d’environnement`);
   }
 
   const now = Date.now();
-  if (!forceRefresh && cachedToken && now < tokenExpiresAt) {
-    return cachedToken;
+  const entry = tokenCache[canonicalCategory];
+  if (!forceRefresh && entry?.token && now < entry.expiresAt) {
+    return entry.token;
   }
 
   const res = await fetch(`${SENDIT_API_BASE}/login`, {
@@ -139,7 +167,7 @@ const getSenditToken = async (forceRefresh = false) => {
 
   if (!res.ok) {
     const errText = await res.text();
-    throw new Error(`Erreur login Sendit (${res.status}): ${errText}`);
+    throw new Error(`Erreur login Sendit (${canonicalCategory} - ${res.status}): ${errText}`);
   }
 
   const json = await res.json();
@@ -151,12 +179,14 @@ const getSenditToken = async (forceRefresh = false) => {
     '';
 
   if (!token) {
-    throw new Error('Token introuvable dans la réponse POST /login Sendit');
+    throw new Error(`Token introuvable dans la réponse POST /login Sendit (${canonicalCategory})`);
   }
 
-  cachedToken = token;
-  tokenExpiresAt = now + 50 * 60 * 1000;
-  return cachedToken;
+  tokenCache[canonicalCategory] = {
+    token,
+    expiresAt: now + 50 * 60 * 1000
+  };
+  return token;
 };
 
 const extractSenditFee = (parcel = {}, city = '', districtName = '') => {
@@ -321,8 +351,8 @@ const fetchSenditPage = async (url, token) => {
   });
 };
 
-const fetchSenditDeliveriesAllPages = async () => {
-  let token = await getSenditToken(false);
+const fetchSenditDeliveriesAllPages = async (category = 'Foulard') => {
+  let token = await getSenditToken(category, false);
   const allItems = [];
   const seenCodes = new Set();
 
@@ -332,7 +362,7 @@ const fetchSenditDeliveriesAllPages = async () => {
     let res = await fetchSenditPage(url, token);
 
     if (res.status === 401 || res.status === 403) {
-      token = await getSenditToken(true);
+      token = await getSenditToken(category, true);
       res = await fetchSenditPage(url, token);
     }
 
@@ -365,8 +395,9 @@ const fetchSenditDeliveriesAllPages = async () => {
   return allItems;
 };
 
-const syncFoulardFromSendit = async () => {
-  const allParcels = await fetchSenditDeliveriesAllPages();
+const syncCategoryFromSendit = async (category = 'Foulard') => {
+  const targetCategory = normalizeCategoryKey(category);
+  const allParcels = await fetchSenditDeliveriesAllPages(targetCategory);
   const novParcels = allParcels.filter(isSinceNov1_2026);
 
   let insertedCount = 0;
@@ -379,7 +410,7 @@ const syncFoulardFromSendit = async () => {
   const insertRow = db.prepare(`
     INSERT INTO products
     (name, client, city, tracking_code, category, stock, sold_count, prix_achat, prix_vente, frais_livraison_unit, statut, statut_livraison, source_sendit, date_saisie)
-    VALUES (?, ?, ?, ?, 'Foulard', 1, 0, ?, ?, ?, ?, ?, 1, ?)
+    VALUES (?, ?, ?, ?, ?, 1, 0, ?, ?, ?, ?, ?, 1, ?)
   `);
 
   const updateRow = db.prepare(`
@@ -406,13 +437,14 @@ const syncFoulardFromSendit = async () => {
       ? dt.toISOString().slice(0, 10)
       : new Date().toISOString().slice(0, 10);
 
-    const existing = findRow.get(code, 'Foulard');
+    const existing = findRow.get(code, targetCategory);
     if (!existing) {
       insertRow.run(
         `Colis ${code}`,
         clientStr,
         displayCity,
         code,
+        targetCategory,
         0,
         salePrice,
         fee,
@@ -446,7 +478,7 @@ const syncFoulardFromSendit = async () => {
   }
 
   return {
-    category: 'Foulard',
+    category: targetCategory,
     since: '2026-11-01',
     syncedAt: new Date().toISOString(),
     totalParcels: novParcels.length,
@@ -455,33 +487,59 @@ const syncFoulardFromSendit = async () => {
   };
 };
 
-// --- ROUTES SYNC SENDIT (Foulard uniquement) ---
-const handleSyncFoulard = async (req, res) => {
+// --- ROUTES SYNC SENDIT (Foulard & Vêtement séparément) ---
+const handleSyncSendit = async (req, res) => {
+  const rawCategory = req.query?.category || req.body?.category;
   try {
-    const result = await syncFoulardFromSendit();
-    res.json({ success: true, ...result });
+    if (rawCategory) {
+      const result = await syncCategoryFromSendit(rawCategory);
+      return res.json({ success: true, ...result });
+    }
+
+    const results = [];
+    for (const cat of ['Foulard', 'Vêtement']) {
+      try {
+        const r = await syncCategoryFromSendit(cat);
+        results.push(r);
+      } catch (e) {
+        results.push({ category: cat, error: e.message });
+      }
+    }
+    const primary = results[0] || {};
+    res.json({ success: true, ...primary, results });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
 };
 
-app.post('/api/sync-sendit', handleSyncFoulard);
-app.get('/api/sync-sendit', handleSyncFoulard);
+app.post('/api/sync-sendit', handleSyncSendit);
+app.get('/api/sync-sendit', handleSyncSendit);
 
-// --- WEBHOOK SENDIT (Foulard) ---
+// --- WEBHOOK SENDIT ---
 app.post('/api/webhook/sendit', (req, res) => {
   try {
     const payload = req.body || {};
     const p = payload.data || payload.parcel || payload.delivery || payload;
     const code = String(p.code || p.tracking_code || p.reference || '').trim();
     const statusLabel = mapSenditStatus(p);
+    const targetCategory = req.query?.category
+      ? normalizeCategoryKey(req.query.category)
+      : null;
 
     if (code && statusLabel) {
-      db.prepare(`
-        UPDATE products
-        SET statut_livraison = ?
-        WHERE tracking_code = ? AND category = 'Foulard'
-      `).run(statusLabel, code);
+      if (targetCategory) {
+        db.prepare(`
+          UPDATE products
+          SET statut_livraison = ?
+          WHERE tracking_code = ? AND category = ?
+        `).run(statusLabel, code, targetCategory);
+      } else {
+        db.prepare(`
+          UPDATE products
+          SET statut_livraison = ?
+          WHERE tracking_code = ?
+        `).run(statusLabel, code);
+      }
     }
 
     res.json({ success: true });
@@ -696,14 +754,16 @@ app.post('/api/inventories', (req, res) => {
   }
 });
 
-// --- AUTO SYNC EVERY 5 MINUTES ---
+// --- AUTO SYNC EVERY 5 MINUTES (Foulard & Vêtement séparément) ---
 const FIVE_MINUTES_MS = 5 * 60 * 1000;
 setInterval(() => {
-  const { publicKey, secretKey } = getFoulardCredentials();
-  if (!publicKey || !secretKey) return;
-  syncFoulardFromSendit()
-    .then((res) => console.log('Sendit Foulard auto-sync (5min):', res))
-    .catch((err) => console.log('Sendit Foulard auto-sync error:', err.message));
+  for (const cat of ['Foulard', 'Vêtement']) {
+    const creds = getSenditCredentialsForCategory(cat);
+    if (!creds.publicKey || !creds.secretKey) continue;
+    syncCategoryFromSendit(cat)
+      .then((res) => console.log(`Sendit ${cat} auto-sync (5min):`, res))
+      .catch((err) => console.log(`Sendit ${cat} auto-sync error:`, err.message));
+  }
 }, FIVE_MINUTES_MS);
 
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
