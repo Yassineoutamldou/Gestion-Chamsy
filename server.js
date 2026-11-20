@@ -123,9 +123,9 @@ const getSenditCredentialsForCategory = (category = 'Foulard') => {
     return {
       canonicalCategory: 'Vêtement',
       publicKey:
-        process.env.SENDIT_VETEMENT_PUBLIC_KEY || 'fcba9e7929e7637a84d3f1afc1a46c6a',
+        process.env.SENDIT_VETEMENT_PUBLIC_KEY || 'ed7f000d1640d7fc8865339f97fd19c5',
       secretKey:
-        process.env.SENDIT_VETEMENT_SECRET_KEY || '2f1KbGsOR5jknEJv1vulvevOxztLNJi0'
+        process.env.SENDIT_VETEMENT_SECRET_KEY || '3ENO9ezkizNtW5QpKInhLaO1x82RxSAd'
     };
   }
 
@@ -352,7 +352,7 @@ const fetchSenditPage = async (url, token) => {
 };
 
 const fetchSenditDeliveriesAllPages = async (category = 'Foulard') => {
-  let token = await getSenditToken(category, false);
+  let token = await getSenditToken(category, true);
   const allItems = [];
   const seenCodes = new Set();
 
