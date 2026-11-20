@@ -29,6 +29,28 @@ const CASA_ENVIRONS = [
   'deroua'
 ];
 
+const EXACT_PARCEL_STATUSES = [
+  'En attente',
+  'À préparer',
+  'À changer',
+  'Ramassage en cours',
+  'Ramassage à vérifier',
+  'Ramassé',
+  'Entrepôt',
+  'En transit',
+  'Distribué',
+  'Injoignable',
+  'Reporté',
+  'Programmé',
+  'En cours de livraison',
+  'Annulé',
+  'Refusé',
+  'Livré',
+  'Remboursé'
+];
+
+const EXACT_FACTURATION_STATUSES = ['En attente', 'En cours', 'Facturé'];
+
 const db = new Database(path.join(__dirname, 'database.sqlite'));
 console.log('🟢 Connecté à la base de données SQLite');
 
@@ -178,7 +200,7 @@ const computeDeliveryFee = (city = '', districtName = '', senditFee = null) => {
   return 35;
 };
 
-const normalizeText = (val = '') =>
+const norm = (val = '') =>
   String(val)
     .toLowerCase()
     .normalize('NFD')
@@ -186,14 +208,18 @@ const normalizeText = (val = '') =>
     .replace(/[_-]+/g, ' ')
     .trim();
 
-const mapSenditStatus = (rawStatus = '') => {
-  const s = normalizeText(rawStatus);
+const mapExactSenditStatus = (rawStatus = '') => {
+  const rawStr = String(rawStatus || '').trim();
+  const exactMatch = EXACT_PARCEL_STATUSES.find((s) => norm(s) === norm(rawStr));
+  if (exactMatch) return exactMatch;
+
+  const s = norm(rawStr);
   if (!s) return 'En attente';
 
   if (s === 'dd' || s === 'delivered' || s === 'livre' || s.includes('deliv') || s.includes('livre')) {
     return 'Livré';
   }
-  if (s.includes('rembours') || s.includes('refund') || s.includes('paid')) {
+  if (s.includes('rembours') || s.includes('refund')) {
     return 'Remboursé';
   }
   if (s === 'rt' || s === 'refused' || s === 'refuse' || s.includes('refus') || s.includes('retour') || s.includes('return')) {
@@ -242,10 +268,10 @@ const mapSenditStatus = (rawStatus = '') => {
     return 'En attente';
   }
 
-  return String(rawStatus).trim();
+  return rawStr;
 };
 
-const mapFacturationStatus = (parcel = {}) => {
+const mapExactFacturationStatus = (parcel = {}) => {
   const raw =
     parcel.facturation_status ||
     parcel.billing_status ||
@@ -257,9 +283,12 @@ const mapFacturationStatus = (parcel = {}) => {
     '';
 
   if (raw === true || raw === 1) return 'Facturé';
-  const s = normalizeText(raw);
-  if (!s || raw === false || raw === 0) return 'En attente';
+  const rawStr = String(raw || '').trim();
+  const exactMatch = EXACT_FACTURATION_STATUSES.find((f) => norm(f) === norm(rawStr));
+  if (exactMatch) return exactMatch;
 
+  const s = norm(rawStr);
+  if (!s || raw === false || raw === 0) return 'En attente';
   if (s.includes('facture') || s.includes('invoiced') || s.includes('billed') || s.includes('paid') || s.includes('paye')) {
     return 'Facturé';
   }
@@ -386,8 +415,8 @@ const syncFoulardFromSendit = async () => {
     const clientStr = String(p.name || p.client || p.phone || code).trim();
     const salePrice = Number(p.amount ?? p.price ?? 0) || 0;
     const fee = computeDeliveryFee(cityStr, districtStr, p.fee);
-    const statusLabel = mapSenditStatus(p.status || p.etat || '');
-    const facturationLabel = mapFacturationStatus(p);
+    const statusLabel = mapExactSenditStatus(p.status || p.etat || '');
+    const facturationLabel = mapExactFacturationStatus(p);
 
     const dt = extractParcelDate(p);
     const dateStr = dt
@@ -464,8 +493,8 @@ app.post('/api/webhook/sendit', (req, res) => {
     const payload = req.body || {};
     const p = payload.data || payload.parcel || payload.delivery || payload;
     const code = String(p.code || p.tracking_code || p.reference || '').trim();
-    const statusLabel = mapSenditStatus(p.status || p.etat || '');
-    const facturationLabel = mapFacturationStatus(p);
+    const statusLabel = mapExactSenditStatus(p.status || p.etat || '');
+    const facturationLabel = mapExactFacturationStatus(p);
 
     if (code && statusLabel) {
       db.prepare(`
