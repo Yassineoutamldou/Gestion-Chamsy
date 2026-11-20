@@ -9,13 +9,28 @@ app.use(cors());
 app.use(express.json());
 
 const PORT = process.env.PORT || 5000;
-
-const SENDIT_PUBLIC_KEY = process.env.SENDIT_PUBLIC_KEY || '';
-const SENDIT_SECRET_KEY = process.env.SENDIT_SECRET_KEY || '';
 const SENDIT_API_BASE = process.env.SENDIT_API_URL || 'https://app.sendit.ma/api/v1';
+const START_DATE_NOV_2026 = new Date('2026-11-01T00:00:00.000Z');
+
+const CASA_ENVIRONS = [
+  'bouskoura',
+  'nouaceur',
+  'dar bouazza',
+  'tit mellil',
+  'mohammedia',
+  'berrechid',
+  'mediouna',
+  'sidi rahal',
+  'ain harrouda',
+  'lahraouiyine',
+  'salmia',
+  'lissasfa',
+  'had soualem',
+  'deroua'
+];
 
 const db = new Database(path.join(__dirname, 'database.sqlite'));
-console.log("🟢 Connecté à la base de données SQLite");
+console.log('🟢 Connecté à la base de données SQLite');
 
 const initDB = () => {
   try {
@@ -24,6 +39,7 @@ const initDB = () => {
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL,
         client TEXT DEFAULT '',
+        city TEXT DEFAULT '',
         tracking_code TEXT DEFAULT '',
         category TEXT NOT NULL,
         stock INTEGER DEFAULT 1,
@@ -32,7 +48,8 @@ const initDB = () => {
         prix_vente REAL DEFAULT 0,
         frais_livraison_unit REAL DEFAULT 35,
         statut TEXT DEFAULT 'En attente',
-        statut_livraison TEXT DEFAULT 'Livré',
+        statut_livraison TEXT DEFAULT 'En cours',
+        source_sendit INTEGER DEFAULT 0,
         date_saisie TEXT
       );
 
@@ -64,11 +81,13 @@ const initDB = () => {
 
     const alterQueries = [
       "ALTER TABLE products ADD COLUMN client TEXT DEFAULT ''",
+      "ALTER TABLE products ADD COLUMN city TEXT DEFAULT ''",
       "ALTER TABLE products ADD COLUMN tracking_code TEXT DEFAULT ''",
       "ALTER TABLE products ADD COLUMN sold_count INTEGER DEFAULT 0",
       "ALTER TABLE products ADD COLUMN frais_livraison_unit REAL DEFAULT 35",
       "ALTER TABLE products ADD COLUMN statut TEXT DEFAULT 'En attente'",
-      "ALTER TABLE products ADD COLUMN statut_livraison TEXT DEFAULT 'Livré'",
+      "ALTER TABLE products ADD COLUMN statut_livraison TEXT DEFAULT 'En cours'",
+      "ALTER TABLE products ADD COLUMN source_sendit INTEGER DEFAULT 0",
       "ALTER TABLE products ADD COLUMN date_saisie TEXT",
       "ALTER TABLE purchases ADD COLUMN status TEXT DEFAULT 'Payé'"
     ];
@@ -79,176 +98,281 @@ const initDB = () => {
       } catch (e) {}
     }
 
-    console.log("Database SQLite ready!");
+    console.log('Database SQLite ready!');
   } catch (err) {
-    console.error("Erreur DB SQLite:", err.message);
+    console.error('Erreur DB SQLite:', err.message);
   }
 };
 
 initDB();
 
-// --- CACHE TOKEN SENDIT ---
-let cachedSenditToken = null;
+const getFoulardCredentials = () => ({
+  publicKey: process.env.SENDIT_FOULARD_PUBLIC_KEY || process.env.SENDIT_PUBLIC_KEY || '',
+  secretKey: process.env.SENDIT_FOULARD_SECRET_KEY || process.env.SENDIT_SECRET_KEY || ''
+});
+
+let cachedToken = null;
 let tokenExpiresAt = 0;
 
 const getSenditToken = async (forceRefresh = false) => {
-  if (!SENDIT_PUBLIC_KEY || !SENDIT_SECRET_KEY) {
-    throw new Error("Clés Sendit manquantes dans les variables d'environnement (SENDIT_PUBLIC_KEY / SENDIT_SECRET_KEY)");
+  const { publicKey, secretKey } = getFoulardCredentials();
+  if (!publicKey || !secretKey) {
+    throw new Error('Clés Sendit Foulard manquantes dans les variables d’environnement');
   }
 
   const now = Date.now();
-  if (!forceRefresh && cachedSenditToken && now < tokenExpiresAt) {
-    return cachedSenditToken;
+  if (!forceRefresh && cachedToken && now < tokenExpiresAt) {
+    return cachedToken;
   }
 
-  const response = await fetch(`${SENDIT_API_BASE}/login`, {
+  const res = await fetch(`${SENDIT_API_BASE}/login`, {
     method: 'POST',
     headers: {
-      'Accept': 'application/json',
+      Accept: 'application/json',
       'Content-Type': 'application/json'
     },
     body: JSON.stringify({
-      public_key: SENDIT_PUBLIC_KEY,
-      secret_key: SENDIT_SECRET_KEY
+      public_key: publicKey,
+      secret_key: secretKey
     })
   });
 
-  if (!response.ok) {
-    const errText = await response.text();
-    throw new Error(`Erreur authentification Sendit (${response.status}): ${errText}`);
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`Erreur login Sendit (${res.status}): ${errText}`);
   }
 
-  const data = await response.json();
+  const json = await res.json();
   const token =
-    data?.token ||
-    data?.access_token ||
-    data?.data?.token ||
-    data?.data?.access_token ||
+    json?.token ||
+    json?.access_token ||
+    json?.data?.token ||
+    json?.data?.access_token ||
     '';
 
   if (!token) {
-    throw new Error("Jeton introuvable dans la réponse de POST /login Sendit");
+    throw new Error('Token introuvable dans la réponse POST /login Sendit');
   }
 
-  cachedSenditToken = token;
-  tokenExpiresAt = now + 50 * 60 * 1000; // renouvellement toutes les 50 minutes
-  return cachedSenditToken;
+  cachedToken = token;
+  tokenExpiresAt = now + 50 * 60 * 1000;
+  return cachedToken;
+};
+
+const computeDeliveryFee = (city = '', districtName = '', senditFee = null) => {
+  const text = `${city} ${districtName}`.toLowerCase().trim();
+  if (text) {
+    for (const env of CASA_ENVIRONS) {
+      if (text.includes(env)) return 29;
+    }
+    if (text.includes('casablanca') || text.includes('casa')) {
+      return 19;
+    }
+    return 35;
+  }
+  if (senditFee !== null && senditFee !== undefined && !Number.isNaN(Number(senditFee))) {
+    return Number(senditFee);
+  }
+  return 35;
 };
 
 const mapSenditStatus = (rawStatus = '') => {
   const s = String(rawStatus).toLowerCase().trim();
-  if (s.includes('deliv') || s.includes('livré') || s.includes('livre') || s === 'dd') {
+  if (
+    s.includes('deliv') ||
+    s.includes('livré') ||
+    s.includes('livre') ||
+    s === 'dd' ||
+    s === 'delivered'
+  ) {
     return 'Livré';
   }
-  if (s.includes('refus') || s.includes('return') || s.includes('retour') || s.includes('annul') || s === 'rt') {
+  if (
+    s.includes('refus') ||
+    s.includes('return') ||
+    s.includes('retour') ||
+    s.includes('annul') ||
+    s === 'rt' ||
+    s === 'refused'
+  ) {
     return 'Refusé';
   }
-  return null;
+  return rawStatus ? String(rawStatus).toUpperCase() : 'En cours';
 };
 
-const fetchSenditParcels = async () => {
+const extractParcelDate = (parcel) => {
+  const raw =
+    parcel.created_at ||
+    parcel.date_creation ||
+    parcel.createdAt ||
+    parcel.date ||
+    parcel.updated_at ||
+    '';
+  if (!raw) return null;
+  const dt = new Date(raw);
+  return Number.isNaN(dt.getTime()) ? null : dt;
+};
+
+const isSinceNov1_2026 = (parcel) => {
+  const dt = extractParcelDate(parcel);
+  if (!dt) return true;
+  return dt >= START_DATE_NOV_2026;
+};
+
+const fetchSenditDeliveries = async () => {
   let token = await getSenditToken(false);
 
-  let response = await fetch(`${SENDIT_API_BASE}/deliveries`, {
+  let res = await fetch(`${SENDIT_API_BASE}/deliveries`, {
     method: 'GET',
     headers: {
-      'Accept': 'application/json',
+      Accept: 'application/json',
       'Content-Type': 'application/json',
-      'Authorization': `Bearer ${token}`
+      Authorization: `Bearer ${token}`
     }
   });
 
-  if (response.status === 401 || response.status === 403) {
+  if (res.status === 401 || res.status === 403) {
     token = await getSenditToken(true);
-    response = await fetch(`${SENDIT_API_BASE}/deliveries`, {
+    res = await fetch(`${SENDIT_API_BASE}/deliveries`, {
       method: 'GET',
       headers: {
-        'Accept': 'application/json',
+        Accept: 'application/json',
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${token}`
+        Authorization: `Bearer ${token}`
       }
     });
   }
 
-  if (!response.ok) {
-    const errText = await response.text();
-    throw new Error(`Erreur API Sendit (${response.status}): ${errText}`);
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`Erreur GET /deliveries Sendit (${res.status}): ${errText}`);
   }
 
-  const data = await response.json();
-  if (Array.isArray(data)) return data;
-  if (Array.isArray(data.data)) return data.data;
-  if (Array.isArray(data.deliveries)) return data.deliveries;
-  if (Array.isArray(data.parcels)) return data.parcels;
+  const json = await res.json();
+  if (Array.isArray(json)) return json;
+  if (Array.isArray(json?.data)) return json.data;
+  if (Array.isArray(json?.data?.data)) return json.data.data;
+  if (Array.isArray(json?.deliveries)) return json.deliveries;
+  if (Array.isArray(json?.parcels)) return json.parcels;
   return [];
 };
 
-const syncSenditStatuses = async () => {
-  const parcels = await fetchSenditParcels();
+const syncFoulardFromSendit = async () => {
+  const allParcels = await fetchSenditDeliveries();
+  const novParcels = allParcels.filter(isSinceNov1_2026);
+
+  let insertedCount = 0;
   let updatedCount = 0;
 
-  const stmt = db.prepare(`
-    UPDATE products
-    SET statut_livraison = ?
-    WHERE tracking_code = ? AND category = 'Foulard' AND statut_livraison != ?
+  const findRow = db.prepare(
+    'SELECT id, client, city, prix_vente, frais_livraison_unit, statut_livraison, date_saisie FROM products WHERE tracking_code = ? AND category = ?'
+  );
+
+  const insertRow = db.prepare(`
+    INSERT INTO products
+    (name, client, city, tracking_code, category, stock, sold_count, prix_achat, prix_vente, frais_livraison_unit, statut, statut_livraison, source_sendit, date_saisie)
+    VALUES (?, ?, ?, ?, 'Foulard', 1, 0, 0, ?, ?, ?, ?, 1, ?)
   `);
 
-  for (const parcel of parcels) {
-    const code = String(
-      parcel.code || parcel.tracking_code || parcel.reference || parcel.id || ''
-    ).trim();
-    const mappedStatus = mapSenditStatus(
-      parcel.status || parcel.etat || parcel.state || parcel.delivery_status || ''
-    );
+  const updateRow = db.prepare(`
+    UPDATE products
+    SET client = ?, city = ?, prix_vente = ?, frais_livraison_unit = ?, statut_livraison = ?, source_sendit = 1, date_saisie = ?
+    WHERE id = ?
+  `);
 
-    if (!code || !mappedStatus) continue;
+  for (const p of novParcels) {
+    const code = String(p.code || p.tracking_code || p.reference || '').trim();
+    if (!code) continue;
 
-    const info = stmt.run(mappedStatus, code, mappedStatus);
-    if (info && info.changes > 0) {
-      updatedCount += info.changes;
+    const district = p.district && typeof p.district === 'object' ? p.district : {};
+    const cityStr = String(district.ville || p.city || p.ville || '').trim();
+    const districtStr = String(district.name || p.district || '').trim();
+    const displayCity = cityStr || districtStr || '—';
+    const clientStr = String(p.name || p.client || p.phone || code).trim();
+    const salePrice = Number(p.amount ?? p.price ?? 0) || 0;
+    const fee = computeDeliveryFee(cityStr, districtStr, p.fee);
+    const statusLabel = mapSenditStatus(p.status || p.etat || '');
+
+    const dt = extractParcelDate(p);
+    const dateStr = dt
+      ? dt.toISOString().slice(0, 10)
+      : new Date().toISOString().slice(0, 10);
+
+    const existing = findRow.get(code, 'Foulard');
+    if (!existing) {
+      insertRow.run(
+        `Colis ${code}`,
+        clientStr,
+        displayCity,
+        code,
+        salePrice,
+        fee,
+        statusLabel,
+        statusLabel,
+        dateStr
+      );
+      insertedCount += 1;
+    } else {
+      const hasChanged =
+        existing.client !== clientStr ||
+        existing.city !== displayCity ||
+        Number(existing.prix_vente) !== salePrice ||
+        Number(existing.frais_livraison_unit) !== fee ||
+        existing.statut_livraison !== statusLabel ||
+        (existing.date_saisie || '') !== dateStr;
+
+      if (hasChanged) {
+        updateRow.run(
+          clientStr,
+          displayCity,
+          salePrice,
+          fee,
+          statusLabel,
+          dateStr,
+          existing.id
+        );
+        updatedCount += 1;
+      }
     }
   }
 
-  return { targetCategory: 'Foulard', totalParcels: parcels.length, updatedCount };
+  return {
+    category: 'Foulard',
+    since: '2026-11-01',
+    syncedAt: new Date().toISOString(),
+    totalParcels: novParcels.length,
+    insertedCount,
+    updatedCount
+  };
 };
 
-// --- ROUTES SYNC SENDIT ---
-app.post('/api/sync-sendit', async (req, res) => {
+// --- ROUTES SYNC SENDIT (Foulard uniquement) ---
+const handleSyncFoulard = async (req, res) => {
   try {
-    const result = await syncSenditStatuses();
+    const result = await syncFoulardFromSendit();
     res.json({ success: true, ...result });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
-});
+};
 
-app.get('/api/sync-sendit', async (req, res) => {
-  try {
-    const result = await syncSenditStatuses();
-    res.json({ success: true, ...result });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
+app.post('/api/sync-sendit', handleSyncFoulard);
+app.get('/api/sync-sendit', handleSyncFoulard);
 
-// --- WEBHOOK SENDIT (catégorie Foulard) ---
+// --- WEBHOOK SENDIT (Foulard) ---
 app.post('/api/webhook/sendit', (req, res) => {
   try {
     const payload = req.body || {};
-    const parcel = payload.data || payload.parcel || payload.delivery || payload;
-    const code = String(
-      parcel.code || parcel.tracking_code || parcel.reference || parcel.id || ''
-    ).trim();
-    const mappedStatus = mapSenditStatus(
-      parcel.status || parcel.etat || parcel.state || parcel.delivery_status || ''
-    );
+    const p = payload.data || payload.parcel || payload.delivery || payload;
+    const code = String(p.code || p.tracking_code || p.reference || '').trim();
+    const statusLabel = mapSenditStatus(p.status || p.etat || '');
 
-    if (code && mappedStatus) {
+    if (code && statusLabel) {
       db.prepare(`
         UPDATE products
         SET statut_livraison = ?
         WHERE tracking_code = ? AND category = 'Foulard'
-      `).run(mappedStatus, code);
+      `).run(statusLabel, code);
     }
 
     res.json({ success: true });
@@ -274,6 +398,7 @@ app.post('/api/products', (req, res) => {
   const {
     name,
     client,
+    city,
     tracking_code,
     category,
     stock,
@@ -289,20 +414,21 @@ app.post('/api/products', (req, res) => {
     const isMagasin = category === 'Magasin';
     const info = db.prepare(`
       INSERT INTO products
-      (name, client, tracking_code, category, stock, sold_count, prix_achat, prix_vente, frais_livraison_unit, statut, statut_livraison, date_saisie)
-      VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)
+      (name, client, city, tracking_code, category, stock, sold_count, prix_achat, prix_vente, frais_livraison_unit, statut, statut_livraison, date_saisie)
+      VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)
     `).run(
       name,
       client || '',
+      city || '',
       tracking_code || '',
-      category || 'General',
+      category || 'Foulard',
       Number(stock) || 1,
       Number(prix_achat) || 0,
       Number(prix_vente) || 0,
       isMagasin ? 0 : (Number(frais_livraison_unit) ?? 35),
-      statut || 'En attente',
+      statut || 'Confirmé',
       statut_livraison || 'Livré',
-      date_saisie || null
+      date_saisie || new Date().toISOString().slice(0, 10)
     );
     res.json({ success: true, id: info.lastInsertRowid });
   } catch (err) {
@@ -315,6 +441,7 @@ app.put('/api/products/:id', (req, res) => {
   const {
     name,
     client,
+    city,
     tracking_code,
     category,
     stock,
@@ -330,20 +457,21 @@ app.put('/api/products/:id', (req, res) => {
     const isMagasin = category === 'Magasin';
     db.prepare(`
       UPDATE products
-      SET name = ?, client = ?, tracking_code = ?, category = ?, stock = ?, prix_achat = ?, prix_vente = ?, frais_livraison_unit = ?, statut = ?, statut_livraison = ?, date_saisie = ?
+      SET name = ?, client = ?, city = ?, tracking_code = ?, category = ?, stock = ?, prix_achat = ?, prix_vente = ?, frais_livraison_unit = ?, statut = ?, statut_livraison = ?, date_saisie = ?
       WHERE id = ?
     `).run(
       name,
       client || '',
+      city || '',
       tracking_code || '',
       category,
       Number(stock) || 1,
       Number(prix_achat) || 0,
       Number(prix_vente) || 0,
       isMagasin ? 0 : (Number(frais_livraison_unit) ?? 35),
-      statut || 'En attente',
+      statut || 'Confirmé',
       statut_livraison || 'Livré',
-      date_saisie || null,
+      date_saisie || new Date().toISOString().slice(0, 10),
       id
     );
     res.json({ success: true });
@@ -361,53 +489,7 @@ app.delete('/api/products/:id', (req, res) => {
   }
 });
 
-// --- PURCHASES ---
-app.get('/api/purchases', (req, res) => {
-  const { category } = req.query;
-  try {
-    const rows = category
-      ? db.prepare('SELECT * FROM purchases WHERE category = ? ORDER BY id DESC').all(category)
-      : db.prepare('SELECT * FROM purchases ORDER BY id DESC').all();
-    res.json(rows);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.post('/api/purchases', (req, res) => {
-  const { category, title, amount, status, date_saisie } = req.body;
-  try {
-    const info = db.prepare(
-      'INSERT INTO purchases (category, title, amount, status, date_saisie) VALUES (?, ?, ?, ?, ?)'
-    ).run(category || 'General', title, Number(amount) || 0, status || 'Payé', date_saisie || null);
-    res.json({ success: true, id: info.lastInsertRowid });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.put('/api/purchases/:id', (req, res) => {
-  const { category, title, amount, status, date_saisie } = req.body;
-  try {
-    db.prepare(
-      'UPDATE purchases SET category = ?, title = ?, amount = ?, status = ?, date_saisie = ? WHERE id = ?'
-    ).run(category || 'General', title, Number(amount) || 0, status || 'Payé', date_saisie || null, req.params.id);
-    res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.delete('/api/purchases/:id', (req, res) => {
-  try {
-    db.prepare('DELETE FROM purchases WHERE id = ?').run(req.params.id);
-    res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// --- EXPENSES ---
+// --- EXPENSES (Décharges : Ads, Fournisseurs, Logement...) ---
 app.get('/api/expenses', (req, res) => {
   const { category } = req.query;
   try {
@@ -425,7 +507,7 @@ app.post('/api/expenses', (req, res) => {
   try {
     const info = db.prepare(
       'INSERT INTO expenses (category, title, amount, date_saisie) VALUES (?, ?, ?, ?)'
-    ).run(category || 'General', title, Number(amount) || 0, date_saisie || null);
+    ).run(category || 'Foulard', title, Number(amount) || 0, date_saisie || new Date().toISOString().slice(0, 10));
     res.json({ success: true, id: info.lastInsertRowid });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -437,7 +519,7 @@ app.put('/api/expenses/:id', (req, res) => {
   try {
     db.prepare(
       'UPDATE expenses SET category = ?, title = ?, amount = ?, date_saisie = ? WHERE id = ?'
-    ).run(category || 'General', title, Number(amount) || 0, date_saisie || null, req.params.id);
+    ).run(category || 'Foulard', title, Number(amount) || 0, date_saisie || new Date().toISOString().slice(0, 10), req.params.id);
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -453,7 +535,31 @@ app.delete('/api/expenses/:id', (req, res) => {
   }
 });
 
-// --- INVENTORIES ---
+// --- PURCHASES & INVENTORIES ---
+app.get('/api/purchases', (req, res) => {
+  const { category } = req.query;
+  try {
+    const rows = category
+      ? db.prepare('SELECT * FROM purchases WHERE category = ? ORDER BY id DESC').all(category)
+      : db.prepare('SELECT * FROM purchases ORDER BY id DESC').all();
+    res.json(rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/purchases', (req, res) => {
+  const { category, title, amount, status, date_saisie } = req.body;
+  try {
+    const info = db.prepare(
+      'INSERT INTO purchases (category, title, amount, status, date_saisie) VALUES (?, ?, ?, ?, ?)'
+    ).run(category || 'Magasin', title, Number(amount) || 0, status || 'Payé', date_saisie || new Date().toISOString().slice(0, 10));
+    res.json({ success: true, id: info.lastInsertRowid });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/api/inventories', (req, res) => {
   const { category } = req.query;
   try {
@@ -471,29 +577,21 @@ app.post('/api/inventories', (req, res) => {
   try {
     const info = db.prepare(
       'INSERT INTO inventories (category, title, stock_value, date_saisie) VALUES (?, ?, ?, ?)'
-    ).run(category || 'General', title, Number(stock_value) || 0, date_saisie || null);
+    ).run(category || 'Magasin', title, Number(stock_value) || 0, date_saisie || new Date().toISOString().slice(0, 10));
     res.json({ success: true, id: info.lastInsertRowid });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.delete('/api/inventories/:id', (req, res) => {
-  try {
-    db.prepare('DELETE FROM inventories WHERE id = ?').run(req.params.id);
-    res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// --- AUTO SYNC EVERY 2 HOURS ---
-const TWO_HOURS_MS = 2 * 60 * 60 * 1000;
+// --- AUTO SYNC EVERY 1 HOUR (1H) ---
+const ONE_HOUR_MS = 60 * 60 * 1000;
 setInterval(() => {
-  if (!SENDIT_PUBLIC_KEY || !SENDIT_SECRET_KEY) return;
-  syncSenditStatuses()
-    .then((r) => console.log("Sendit auto-sync:", r))
-    .catch((e) => console.log("Sendit auto-sync skipped/error:", e.message));
-}, TWO_HOURS_MS);
+  const { publicKey, secretKey } = getFoulardCredentials();
+  if (!publicKey || !secretKey) return;
+  syncFoulardFromSendit()
+    .then((res) => console.log('Sendit Foulard auto-sync (1H):', res))
+    .catch((err) => console.log('Sendit Foulard auto-sync error:', err.message));
+}, ONE_HOUR_MS);
 
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
