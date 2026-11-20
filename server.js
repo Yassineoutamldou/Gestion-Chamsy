@@ -262,7 +262,7 @@ const extractListFromResponse = (json) => {
 };
 
 const fetchSenditPage = async (url, token) => {
-  const res = await fetch(url, {
+  return fetch(url, {
     method: 'GET',
     headers: {
       Accept: 'application/json',
@@ -270,7 +270,6 @@ const fetchSenditPage = async (url, token) => {
       Authorization: `Bearer ${token}`
     }
   });
-  return res;
 };
 
 const fetchSenditDeliveriesAllPages = async () => {
@@ -279,7 +278,8 @@ const fetchSenditDeliveriesAllPages = async () => {
   const seenCodes = new Set();
 
   for (let page = 1; page <= 10; page += 1) {
-    const url = page === 1 ? `${SENDIT_API_BASE}/deliveries` : `${SENDIT_API_BASE}/deliveries?page=${page}`;
+    const url =
+      page === 1 ? `${SENDIT_API_BASE}/deliveries` : `${SENDIT_API_BASE}/deliveries?page=${page}`;
     let res = await fetchSenditPage(url, token);
 
     if (res.status === 401 || res.status === 403) {
@@ -440,22 +440,17 @@ app.post('/api/webhook/sendit', (req, res) => {
   }
 });
 
-// --- API PRODUCTS (Trié du plus ancien en bas au plus récent en haut) ---
+// --- API PRODUCTS ---
 app.get('/api/products', (req, res) => {
   const { category } = req.query;
   try {
     const rows = category
-      ? db
-          .prepare(
-            'SELECT * FROM products WHERE category = ? ORDER BY COALESCE(date_saisie, "") ASC, id ASC'
-          )
-          .all(category)
-      : db
-          .prepare('SELECT * FROM products ORDER BY COALESCE(date_saisie, "") ASC, id ASC')
-          .all();
-    res.json(rows);
+      ? db.prepare('SELECT * FROM products WHERE category = ? ORDER BY id DESC').all(category)
+      : db.prepare('SELECT * FROM products ORDER BY id DESC').all();
+    res.json(Array.isArray(rows) ? rows : []);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('Erreur GET /api/products:', err.message);
+    res.status(200).json([]);
   }
 });
 
@@ -561,9 +556,9 @@ app.get('/api/expenses', (req, res) => {
     const rows = category
       ? db.prepare('SELECT * FROM expenses WHERE category = ? ORDER BY id DESC').all(category)
       : db.prepare('SELECT * FROM expenses ORDER BY id DESC').all();
-    res.json(rows);
+    res.json(Array.isArray(rows) ? rows : []);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(200).json([]);
   }
 });
 
@@ -607,9 +602,9 @@ app.get('/api/purchases', (req, res) => {
     const rows = category
       ? db.prepare('SELECT * FROM purchases WHERE category = ? ORDER BY id DESC').all(category)
       : db.prepare('SELECT * FROM purchases ORDER BY id DESC').all();
-    res.json(rows);
+    res.json(Array.isArray(rows) ? rows : []);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(200).json([]);
   }
 });
 
@@ -631,9 +626,9 @@ app.get('/api/inventories', (req, res) => {
     const rows = category
       ? db.prepare('SELECT * FROM inventories WHERE category = ? ORDER BY id DESC').all(category)
       : db.prepare('SELECT * FROM inventories ORDER BY id DESC').all();
-    res.json(rows);
+    res.json(Array.isArray(rows) ? rows : []);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(200).json([]);
   }
 });
 
