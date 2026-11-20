@@ -225,6 +225,7 @@ const norm = (val = '') =>
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
     .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
     .trim();
 
 const extractRawSenditStatus = (parcel = {}) => {
@@ -240,7 +241,9 @@ const extractRawSenditStatus = (parcel = {}) => {
     parcel.parcel_status,
     parcel.status?.name,
     parcel.status?.label,
-    parcel.etat?.name
+    parcel.status?.title,
+    parcel.etat?.name,
+    parcel.etat?.label
   ];
 
   for (const c of candidates) {
@@ -253,63 +256,94 @@ const extractRawSenditStatus = (parcel = {}) => {
   return '';
 };
 
+const SENDIT_EXACT_MAP = {
+  'en attente': 'En attente',
+  'pending': 'En attente',
+  'new': 'En attente',
+  'created': 'En attente',
+  'draft': 'En attente',
+  'a preparer': 'À préparer',
+  'à préparer': 'À préparer',
+  'a changer': 'À changer',
+  'à changer': 'À changer',
+  'ramassage en cours': 'Ramassage en cours',
+  'ramassage a verifier': 'Ramassage à vérifier',
+  'ramassage à vérifier': 'Ramassage à vérifier',
+  'ramasse': 'Ramassé',
+  'ramassé': 'Ramassé',
+  'picked up': 'Ramassé',
+  'pickup': 'Ramassé',
+  'entrepot': 'Entrepôt',
+  'entrepôt': 'Entrepôt',
+  'warehouse': 'Entrepôt',
+  'en transit': 'En transit',
+  'in transit': 'En transit',
+  'distribue': 'Distribué',
+  'distribué': 'Distribué',
+  'injoignable': 'Injoignable',
+  'unreachable': 'Injoignable',
+  'reporte': 'Reporté',
+  'reporté': 'Reporté',
+  'postponed': 'Reporté',
+  'programme': 'Programmé',
+  'programmé': 'Programmé',
+  'scheduled': 'Programmé',
+  'en cours de livraison': 'En cours de livraison',
+  'out for delivery': 'En cours de livraison',
+  'annule': 'Annulé',
+  'annulé': 'Annulé',
+  'canceled': 'Annulé',
+  'cancelled': 'Annulé',
+  'refuse': 'Refusé',
+  'refusé': 'Refusé',
+  'refused': 'Refusé',
+  'rejected': 'Refusé',
+  'retourne': 'Refusé',
+  'retourné': 'Refusé',
+  'returned': 'Refusé',
+  'return': 'Refusé',
+  'rt': 'Refusé',
+  'livre': 'Livré',
+  'livré': 'Livré',
+  'delivered': 'Livré',
+  'dd': 'Livré',
+  'rembourse': 'Remboursé',
+  'remboursé': 'Remboursé'
+};
+
 const mapSenditStatus = (parcelOrRaw = '') => {
   const rawStatus =
     typeof parcelOrRaw === 'object' && parcelOrRaw !== null
       ? extractRawSenditStatus(parcelOrRaw)
       : String(parcelOrRaw || '');
 
-  const s = norm(rawStatus);
-  if (!s) return 'En cours de livraison';
+  const trimmed = String(rawStatus || '').trim();
+  if (!trimmed) return 'En attente';
 
-  if (
-    s === 'dd' ||
-    s === 'delivered' ||
-    s === 'livre' ||
-    s.includes('deliv') ||
-    s.includes('livre') ||
-    s.includes('rembours')
-  ) {
-    return 'Livré';
+  const key = norm(trimmed);
+  if (SENDIT_EXACT_MAP[key]) {
+    return SENDIT_EXACT_MAP[key];
   }
 
-  if (
-    s === 'rt' ||
-    s === 'refused' ||
-    s === 'rejected' ||
-    s === 'refuse' ||
-    s === 'returned' ||
-    s === 'return' ||
-    s.includes('refus') ||
-    s.includes('reject') ||
-    s.includes('retour') ||
-    s.includes('return')
-  ) {
+  if (key.includes('ramass') && key.includes('cours')) return 'Ramassage en cours';
+  if (key.includes('ramass') && key.includes('verif')) return 'Ramassage à vérifier';
+  if (key.includes('ramass') || key.includes('pick')) return 'Ramassé';
+  if (key.includes('entrepot') || key.includes('warehouse')) return 'Entrepôt';
+  if (key.includes('transit')) return 'En transit';
+  if (key.includes('distrib')) return 'Distribué';
+  if (key.includes('injoign') || key.includes('unreach')) return 'Injoignable';
+  if (key.includes('report')) return 'Reporté';
+  if (key.includes('programm') || key.includes('schedul')) return 'Programmé';
+  if (key.includes('livraison') || key.includes('delivery')) return 'En cours de livraison';
+  if (key.includes('annul') || key.includes('cancel')) return 'Annulé';
+  if (key.includes('refus') || key.includes('reject') || key.includes('retour') || key.includes('return')) {
     return 'Refusé';
   }
+  if (key.includes('rembours')) return 'Remboursé';
+  if (key.includes('deliv') || key.includes('livre')) return 'Livré';
+  if (key.includes('attent') || key.includes('pend')) return 'En attente';
 
-  if (
-    s === 'canceled' ||
-    s === 'cancelled' ||
-    s === 'annule' ||
-    s.includes('cancel') ||
-    s.includes('annul')
-  ) {
-    return 'Annulé';
-  }
-
-  if (
-    s === 'pending' ||
-    s === 'new' ||
-    s === 'created' ||
-    s === 'draft' ||
-    s === 'attente' ||
-    s === 'en attente'
-  ) {
-    return 'En attente';
-  }
-
-  return 'En cours de livraison';
+  return trimmed;
 };
 
 const extractParcelDate = (parcel) => {
@@ -597,7 +631,7 @@ app.post('/api/products', (req, res) => {
       Number(prix_vente) || 0,
       isMagasin ? 0 : (Number(frais_livraison_unit) ?? 35),
       statut || 'En attente',
-      statut_livraison || (isMagasin ? 'Livré' : 'En cours de livraison'),
+      statut_livraison || (isMagasin ? 'Livré' : 'En attente'),
       date_saisie || new Date().toISOString().slice(0, 10)
     );
     res.json({ success: true, id: info.lastInsertRowid });
@@ -640,7 +674,7 @@ app.put('/api/products/:id', (req, res) => {
       Number(prix_vente) || 0,
       isMagasin ? 0 : (Number(frais_livraison_unit) ?? 35),
       statut || 'En attente',
-      statut_livraison || (isMagasin ? 'Livré' : 'En cours de livraison'),
+      statut_livraison || (isMagasin ? 'Livré' : 'En attente'),
       date_saisie || new Date().toISOString().slice(0, 10),
       id
     );
