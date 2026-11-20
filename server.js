@@ -29,28 +29,6 @@ const CASA_ENVIRONS = [
   'deroua'
 ];
 
-const EXACT_PARCEL_STATUSES = [
-  'En attente',
-  'À préparer',
-  'À changer',
-  'Ramassage en cours',
-  'Ramassage à vérifier',
-  'Ramassé',
-  'Entrepôt',
-  'En transit',
-  'Distribué',
-  'Injoignable',
-  'Reporté',
-  'Programmé',
-  'En cours de livraison',
-  'Annulé',
-  'Refusé',
-  'Livré',
-  'Remboursé'
-];
-
-const EXACT_FACTURATION_STATUSES = ['En attente', 'En cours', 'Facturé'];
-
 const db = new Database(path.join(__dirname, 'database.sqlite'));
 console.log('🟢 Connecté à la base de données SQLite');
 
@@ -71,7 +49,6 @@ const initDB = () => {
         frais_livraison_unit REAL DEFAULT 35,
         statut TEXT DEFAULT 'En attente',
         statut_livraison TEXT DEFAULT 'En attente',
-        statut_facturation TEXT DEFAULT 'En attente',
         source_sendit INTEGER DEFAULT 0,
         date_saisie TEXT
       );
@@ -110,7 +87,6 @@ const initDB = () => {
       "ALTER TABLE products ADD COLUMN frais_livraison_unit REAL DEFAULT 35",
       "ALTER TABLE products ADD COLUMN statut TEXT DEFAULT 'En attente'",
       "ALTER TABLE products ADD COLUMN statut_livraison TEXT DEFAULT 'En attente'",
-      "ALTER TABLE products ADD COLUMN statut_facturation TEXT DEFAULT 'En attente'",
       "ALTER TABLE products ADD COLUMN source_sendit INTEGER DEFAULT 0",
       "ALTER TABLE products ADD COLUMN date_saisie TEXT",
       "ALTER TABLE purchases ADD COLUMN status TEXT DEFAULT 'Payé'"
@@ -200,102 +176,74 @@ const computeDeliveryFee = (city = '', districtName = '', senditFee = null) => {
   return 35;
 };
 
-const norm = (val = '') =>
-  String(val)
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/[_-]+/g, ' ')
-    .trim();
+const computeAutoBuyPrice = (salePrice = 0, currentBuyPrice = 0) => {
+  const existingBuy = Number(currentBuyPrice) || 0;
+  if (existingBuy > 0) return existingBuy;
 
-const mapExactSenditStatus = (rawStatus = '') => {
-  const rawStr = String(rawStatus || '').trim();
-  const exactMatch = EXACT_PARCEL_STATUSES.find((s) => norm(s) === norm(rawStr));
-  if (exactMatch) return exactMatch;
+  const p = Number(salePrice) || 0;
+  if (p === 219 || p === 220) return 84;
+  if (p === 279 || p === 280) return 112;
+  if (p === 329 || p === 330) return 140;
+  if (p === 379 || p === 380) return 168;
+  return 0;
+};
 
-  const s = norm(rawStr);
-  if (!s) return 'En attente';
+const mapSenditStatus = (rawStatus = '') => {
+  const s = String(rawStatus).toLowerCase().trim();
 
-  if (s === 'dd' || s === 'delivered' || s === 'livre' || s.includes('deliv') || s.includes('livre')) {
+  if (
+    s === 'delivered' ||
+    s === 'livre' ||
+    s === 'livré' ||
+    s === 'dd' ||
+    s.includes('deliv') ||
+    s.includes('livré') ||
+    s.includes('livre')
+  ) {
     return 'Livré';
   }
-  if (s.includes('rembours') || s.includes('refund')) {
-    return 'Remboursé';
-  }
-  if (s === 'rt' || s === 'refused' || s === 'refuse' || s.includes('refus') || s.includes('retour') || s.includes('return')) {
+
+  if (
+    s === 'refused' ||
+    s === 'rejected' ||
+    s === 'refuse' ||
+    s === 'refusé' ||
+    s === 'returned' ||
+    s === 'return' ||
+    s === 'retour' ||
+    s === 'rt' ||
+    s.includes('refus') ||
+    s.includes('reject') ||
+    s.includes('retour') ||
+    s.includes('return')
+  ) {
     return 'Refusé';
   }
-  if (s === 'canceled' || s === 'cancelled' || s === 'annule' || s.includes('cancel') || s.includes('annul')) {
+
+  if (
+    s === 'canceled' ||
+    s === 'cancelled' ||
+    s === 'annule' ||
+    s === 'annulé' ||
+    s.includes('cancel') ||
+    s.includes('annul')
+  ) {
     return 'Annulé';
   }
-  if (s.includes('en cours de livraison') || s.includes('delivering') || s.includes('out for delivery')) {
-    return 'En cours de livraison';
-  }
-  if (s.includes('programm') || s === 'prog') {
-    return 'Programmé';
-  }
-  if (s.includes('report') || s.includes('postpon')) {
-    return 'Reporté';
-  }
-  if (s.includes('injoignable') || s.includes('unreachable') || s.includes('no answer')) {
-    return 'Injoignable';
-  }
-  if (s.includes('distribu')) {
-    return 'Distribué';
-  }
-  if (s.includes('transit')) {
-    return 'En transit';
-  }
-  if (s.includes('entrepot') || s.includes('warehouse') || s.includes('hub')) {
-    return 'Entrepôt';
-  }
-  if (s.includes('ramassage a verifier') || s.includes('verify')) {
-    return 'Ramassage à vérifier';
-  }
-  if (s.includes('ramassage en cours') || s.includes('pickup in progress')) {
-    return 'Ramassage en cours';
-  }
-  if (s.includes('ramasse') || s.includes('picked')) {
-    return 'Ramassé';
-  }
-  if (s.includes('a changer') || s.includes('change')) {
-    return 'À changer';
-  }
-  if (s.includes('a preparer') || s.includes('prepar')) {
-    return 'À préparer';
-  }
-  if (s.includes('attente') || s === 'pending' || s === 'new' || s === 'created') {
+
+  if (
+    s === 'pending' ||
+    s === 'new' ||
+    s === 'created' ||
+    s === 'draft' ||
+    s === 'attente' ||
+    s.includes('attente') ||
+    s.includes('pending')
+  ) {
     return 'En attente';
   }
 
-  return rawStr;
-};
-
-const mapExactFacturationStatus = (parcel = {}) => {
-  const raw =
-    parcel.facturation_status ||
-    parcel.billing_status ||
-    parcel.invoice_status ||
-    parcel.payment_status ||
-    parcel.facturation ||
-    parcel.facture ||
-    parcel.paid ||
-    '';
-
-  if (raw === true || raw === 1) return 'Facturé';
-  const rawStr = String(raw || '').trim();
-  const exactMatch = EXACT_FACTURATION_STATUSES.find((f) => norm(f) === norm(rawStr));
-  if (exactMatch) return exactMatch;
-
-  const s = norm(rawStr);
-  if (!s || raw === false || raw === 0) return 'En attente';
-  if (s.includes('facture') || s.includes('invoiced') || s.includes('billed') || s.includes('paid') || s.includes('paye')) {
-    return 'Facturé';
-  }
-  if (s.includes('cours') || s.includes('progress') || s.includes('processing')) {
-    return 'En cours';
-  }
-  return 'En attente';
+  return 'En cours de livraison';
 };
 
 const extractParcelDate = (parcel) => {
@@ -389,18 +337,18 @@ const syncFoulardFromSendit = async () => {
   let updatedCount = 0;
 
   const findRow = db.prepare(
-    'SELECT id, client, city, prix_vente, frais_livraison_unit, statut_livraison, statut_facturation, date_saisie FROM products WHERE tracking_code = ? AND category = ?'
+    'SELECT id, client, city, prix_achat, prix_vente, frais_livraison_unit, statut_livraison, date_saisie FROM products WHERE tracking_code = ? AND category = ?'
   );
 
   const insertRow = db.prepare(`
     INSERT INTO products
-    (name, client, city, tracking_code, category, stock, sold_count, prix_achat, prix_vente, frais_livraison_unit, statut, statut_livraison, statut_facturation, source_sendit, date_saisie)
-    VALUES (?, ?, ?, ?, 'Foulard', 1, 0, 0, ?, ?, ?, ?, ?, 1, ?)
+    (name, client, city, tracking_code, category, stock, sold_count, prix_achat, prix_vente, frais_livraison_unit, statut, statut_livraison, source_sendit, date_saisie)
+    VALUES (?, ?, ?, ?, 'Foulard', 1, 0, ?, ?, ?, ?, ?, 1, ?)
   `);
 
   const updateRow = db.prepare(`
     UPDATE products
-    SET client = ?, city = ?, prix_vente = ?, frais_livraison_unit = ?, statut_livraison = ?, statut_facturation = ?, source_sendit = 1, date_saisie = ?
+    SET client = ?, city = ?, prix_achat = ?, prix_vente = ?, frais_livraison_unit = ?, statut_livraison = ?, source_sendit = 1, date_saisie = ?
     WHERE id = ?
   `);
 
@@ -415,8 +363,7 @@ const syncFoulardFromSendit = async () => {
     const clientStr = String(p.name || p.client || p.phone || code).trim();
     const salePrice = Number(p.amount ?? p.price ?? 0) || 0;
     const fee = computeDeliveryFee(cityStr, districtStr, p.fee);
-    const statusLabel = mapExactSenditStatus(p.status || p.etat || '');
-    const facturationLabel = mapExactFacturationStatus(p);
+    const statusLabel = mapSenditStatus(p.status || p.etat || '');
 
     const dt = extractParcelDate(p);
     const dateStr = dt
@@ -425,37 +372,39 @@ const syncFoulardFromSendit = async () => {
 
     const existing = findRow.get(code, 'Foulard');
     if (!existing) {
+      const autoBuy = computeAutoBuyPrice(salePrice, 0);
       insertRow.run(
         `Colis ${code}`,
         clientStr,
         displayCity,
         code,
+        autoBuy,
         salePrice,
         fee,
         statusLabel,
         statusLabel,
-        facturationLabel,
         dateStr
       );
       insertedCount += 1;
     } else {
+      const resolvedBuy = computeAutoBuyPrice(salePrice, existing.prix_achat);
       const hasChanged =
         existing.client !== clientStr ||
         existing.city !== displayCity ||
+        Number(existing.prix_achat) !== resolvedBuy ||
         Number(existing.prix_vente) !== salePrice ||
         Number(existing.frais_livraison_unit) !== fee ||
         existing.statut_livraison !== statusLabel ||
-        (existing.statut_facturation || 'En attente') !== facturationLabel ||
         (existing.date_saisie || '') !== dateStr;
 
       if (hasChanged) {
         updateRow.run(
           clientStr,
           displayCity,
+          resolvedBuy,
           salePrice,
           fee,
           statusLabel,
-          facturationLabel,
           dateStr,
           existing.id
         );
@@ -474,7 +423,6 @@ const syncFoulardFromSendit = async () => {
   };
 };
 
-// --- ROUTES SYNC SENDIT (Foulard uniquement) ---
 const handleSyncFoulard = async (req, res) => {
   try {
     const result = await syncFoulardFromSendit();
@@ -487,21 +435,19 @@ const handleSyncFoulard = async (req, res) => {
 app.post('/api/sync-sendit', handleSyncFoulard);
 app.get('/api/sync-sendit', handleSyncFoulard);
 
-// --- WEBHOOK SENDIT (Foulard) ---
 app.post('/api/webhook/sendit', (req, res) => {
   try {
     const payload = req.body || {};
     const p = payload.data || payload.parcel || payload.delivery || payload;
     const code = String(p.code || p.tracking_code || p.reference || '').trim();
-    const statusLabel = mapExactSenditStatus(p.status || p.etat || '');
-    const facturationLabel = mapExactFacturationStatus(p);
+    const statusLabel = mapSenditStatus(p.status || p.etat || '');
 
     if (code && statusLabel) {
       db.prepare(`
         UPDATE products
-        SET statut_livraison = ?, statut_facturation = ?
+        SET statut_livraison = ?
         WHERE tracking_code = ? AND category = 'Foulard'
-      `).run(statusLabel, facturationLabel, code);
+      `).run(statusLabel, code);
     }
 
     res.json({ success: true });
@@ -539,16 +485,21 @@ app.post('/api/products', (req, res) => {
     frais_livraison_unit,
     statut,
     statut_livraison,
-    statut_facturation,
     date_saisie
   } = req.body;
 
   try {
     const isMagasin = category === 'Magasin';
+    const saleVal = Number(prix_vente) || 0;
+    const buyVal =
+      prix_achat !== '' && prix_achat !== undefined && prix_achat !== null
+        ? Number(prix_achat) || 0
+        : computeAutoBuyPrice(saleVal, 0);
+
     const info = db.prepare(`
       INSERT INTO products
-      (name, client, city, tracking_code, category, stock, sold_count, prix_achat, prix_vente, frais_livraison_unit, statut, statut_livraison, statut_facturation, date_saisie)
-      VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)
+      (name, client, city, tracking_code, category, stock, sold_count, prix_achat, prix_vente, frais_livraison_unit, statut, statut_livraison, date_saisie)
+      VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)
     `).run(
       name,
       client || '',
@@ -556,12 +507,11 @@ app.post('/api/products', (req, res) => {
       tracking_code || '',
       category || 'Foulard',
       Number(stock) || 1,
-      Number(prix_achat) || 0,
-      Number(prix_vente) || 0,
+      buyVal,
+      saleVal,
       isMagasin ? 0 : (Number(frais_livraison_unit) ?? 35),
       statut || 'En attente',
       statut_livraison || (isMagasin ? 'Livré' : 'En attente'),
-      statut_facturation || (isMagasin ? 'Facturé' : 'En attente'),
       date_saisie || new Date().toISOString().slice(0, 10)
     );
     res.json({ success: true, id: info.lastInsertRowid });
@@ -584,7 +534,6 @@ app.put('/api/products/:id', (req, res) => {
     frais_livraison_unit,
     statut,
     statut_livraison,
-    statut_facturation,
     date_saisie
   } = req.body;
 
@@ -592,7 +541,7 @@ app.put('/api/products/:id', (req, res) => {
     const isMagasin = category === 'Magasin';
     db.prepare(`
       UPDATE products
-      SET name = ?, client = ?, city = ?, tracking_code = ?, category = ?, stock = ?, prix_achat = ?, prix_vente = ?, frais_livraison_unit = ?, statut = ?, statut_livraison = ?, statut_facturation = ?, date_saisie = ?
+      SET name = ?, client = ?, city = ?, tracking_code = ?, category = ?, stock = ?, prix_achat = ?, prix_vente = ?, frais_livraison_unit = ?, statut = ?, statut_livraison = ?, date_saisie = ?
       WHERE id = ?
     `).run(
       name,
@@ -606,7 +555,6 @@ app.put('/api/products/:id', (req, res) => {
       isMagasin ? 0 : (Number(frais_livraison_unit) ?? 35),
       statut || 'En attente',
       statut_livraison || (isMagasin ? 'Livré' : 'En attente'),
-      statut_facturation || (isMagasin ? 'Facturé' : 'En attente'),
       date_saisie || new Date().toISOString().slice(0, 10),
       id
     );
