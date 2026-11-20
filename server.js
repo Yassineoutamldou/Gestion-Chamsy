@@ -261,36 +261,38 @@ const extractListFromResponse = (json) => {
   return [];
 };
 
+const fetchSenditPage = async (url, token) => {
+  const res = await fetch(url, {
+    method: 'GET',
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`
+    }
+  });
+  return res;
+};
+
 const fetchSenditDeliveriesAllPages = async () => {
   let token = await getSenditToken(false);
   const allItems = [];
   const seenCodes = new Set();
 
-  for (let page = 1; page <= 20; page += 1) {
-    let res = await fetch(`${SENDIT_API_BASE}/deliveries?page=${page}`, {
-      method: 'GET',
-      headers: {
-        Accept: 'application/json',
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}`
-      }
-    });
+  for (let page = 1; page <= 10; page += 1) {
+    const url = page === 1 ? `${SENDIT_API_BASE}/deliveries` : `${SENDIT_API_BASE}/deliveries?page=${page}`;
+    let res = await fetchSenditPage(url, token);
 
     if (res.status === 401 || res.status === 403) {
       token = await getSenditToken(true);
-      res = await fetch(`${SENDIT_API_BASE}/deliveries?page=${page}`, {
-        method: 'GET',
-        headers: {
-          Accept: 'application/json',
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`
-        }
-      });
+      res = await fetchSenditPage(url, token);
     }
 
     if (!res.ok) {
-      const errText = await res.text();
-      throw new Error(`Erreur GET /deliveries Sendit (${res.status}): ${errText}`);
+      if (page === 1) {
+        const errText = await res.text();
+        throw new Error(`Erreur GET /deliveries Sendit (${res.status}): ${errText}`);
+      }
+      break;
     }
 
     const json = await res.json();
