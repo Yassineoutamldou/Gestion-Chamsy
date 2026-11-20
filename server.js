@@ -10,6 +10,7 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 5000;
 const SENDIT_API_BASE = process.env.SENDIT_API_URL || 'https://app.sendit.ma/api/v1';
+const META_GRAPH_VERSION = process.env.META_GRAPH_VERSION || 'v21.0';
 const START_DATE_NOV_2026 = new Date('2026-11-01T00:00:00.000Z');
 
 const CASA_ENVIRONS = [
@@ -520,6 +521,92 @@ const syncCategoryFromSendit = async (category = 'Foulard') => {
     updatedCount
   };
 };
+
+// --- META ADS SYNC (Foulard uniquement — jamais Vêtement) ---
+const syncFoulardMetaAds = async (monthParam = '') => {
+  const accessToken = String(process.env.META_ACCESS_TOKEN || '').trim();
+  const rawAccountId = String(process.env.META_AD_ACCOUNT_ID_FOULARD || '').trim();
+  const usdToMad = Number(process.env.META_USD_TO_MAD) || 10;
+
+  if (!accessToken) {
+    throw new Error('META_ACCESS_TOKEN manquant dans Render');
+  }
+  if (!rawAccountId) {
+    throw new Error('META_AD_ACCOUNT_ID_FOULARD manquant dans Render');
+  }
+
+  const adAccountId = rawAccountId.startsWith('act_') ? rawAccountId : `act_${rawAccountId}`;
+  const targetMonth =
+    /^\d{4}-\d{2}$/.test(monthParam) ? monthParam : new Date().toISOString().slice(0, 7);
+
+  const [year, month] = targetMonth.split('-').map(Number);
+  const firstDay = `${targetMonth}-01`;
+  const lastDayDate = new Date(Date.UTC(year, month, 0));
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const candidateLastDay = lastDayDate.toISOString().slice(0, 10);
+  const untilDay = candidateLastDay > todayStr ? todayStr : candidateLastDay;
+
+  const timeRange = encodeURIComponent(JSON.stringify({ since: firstDay, until: untilDay }));
+  const url = `https://graph.facebook.com/${META_GRAPH_VERSION}/${adAccountId}/insights?fields=spend,impressions,clicks&time_range=${timeRange}&access_token=${encodeURIComponent(
+    accessToken
+  )}`;
+
+  const res = await fetch(url);
+  const json = await res.json();
+
+  if (!res.ok || json?.error) {
+    throw new Error(json?.error?.message || `Erreur Meta Graph API (${res.status})`);
+  }
+
+  const row = Array.isArray(json?.data) && json.data.length > 0 ? json.data[0] : {};
+  const rawSpend = Number(row.spend) || 0;
+  const spendMad = Number((rawSpend * usdToMad).toFixed(2));
+
+  const title = `Meta Ads Foulard (${targetMonth})`;
+  const entryDate = `${targetMonth}-01`;
+
+  const existingExpense = db
+    .prepare('SELECT id FROM expenses WHERE category = ? AND title = ?')
+    .get('Foulard', title);
+
+  if (existingExpense) {
+    db.prepare('UPDATE expenses SET amount = ?, date_saisie = ? WHERE id = ?').run(
+      spendMad,
+      entryDate,
+      existingExpense.id
+    );
+  } else {
+    db.prepare(
+      'INSERT INTO expenses (category, title, amount, date_saisie) VALUES (?, ?, ?, ?)'
+    ).run('Foulard', title, spendMad, entryDate);
+  }
+
+  return {
+    category: 'Foulard',
+    adAccountId,
+    month: targetMonth,
+    rawSpend,
+    usdToMad,
+    spendMad
+  };
+};
+
+app.post('/api/sync-meta', async (req, res) => {
+  try {
+    const rawCat = String(req.query?.category || req.body?.category || 'Foulard');
+    if (normalizeCategoryKey(rawCat) !== 'Foulard') {
+      return res.status(400).json({
+        success: false,
+        error: 'Meta Ads est configuré uniquement pour Foulard'
+      });
+    }
+    const monthParam = String(req.query?.month || req.body?.month || '');
+    const result = await syncFoulardMetaAds(monthParam);
+    res.json({ success: true, ...result });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
 
 // --- ROUTES SYNC SENDIT (Foulard & Vêtement séparément) ---
 const handleSyncSendit = async (req, res) => {
