@@ -159,7 +159,24 @@ const getSenditToken = async (forceRefresh = false) => {
   return cachedToken;
 };
 
-const computeDeliveryFee = (city = '', districtName = '', senditFee = null) => {
+const extractSenditFee = (parcel = {}, city = '', districtName = '') => {
+  const candidates = [
+    parcel.fee,
+    parcel.delivery_fee,
+    parcel.frais_livraison,
+    parcel.shipping_fee,
+    parcel.tarif,
+    parcel.district?.fee,
+    parcel.district?.delivery_fee
+  ];
+
+  for (const val of candidates) {
+    if (val !== null && val !== undefined && val !== '' && !Number.isNaN(Number(val))) {
+      const num = Number(val);
+      if (num > 0) return num;
+    }
+  }
+
   const text = `${city} ${districtName}`.toLowerCase().trim();
   if (text) {
     for (const env of CASA_ENVIRONS) {
@@ -168,10 +185,6 @@ const computeDeliveryFee = (city = '', districtName = '', senditFee = null) => {
     if (text.includes('casablanca') || text.includes('casa')) {
       return 19;
     }
-    return 35;
-  }
-  if (senditFee !== null && senditFee !== undefined && !Number.isNaN(Number(senditFee))) {
-    return Number(senditFee);
   }
   return 35;
 };
@@ -385,7 +398,7 @@ const syncFoulardFromSendit = async () => {
     const displayCity = cityStr || districtStr || '—';
     const clientStr = String(p.name || p.client || p.phone || code).trim();
     const salePrice = Number(p.amount ?? p.price ?? 0) || 0;
-    const fee = computeDeliveryFee(cityStr, districtStr, p.fee);
+    const fee = extractSenditFee(p, cityStr, districtStr);
     const statusLabel = mapSenditStatus(p);
 
     const dt = extractParcelDate(p);
@@ -683,14 +696,14 @@ app.post('/api/inventories', (req, res) => {
   }
 });
 
-// --- AUTO SYNC EVERY 20 MINUTES ---
-const TWENTY_MINUTES_MS = 20 * 60 * 1000;
+// --- AUTO SYNC EVERY 5 MINUTES ---
+const FIVE_MINUTES_MS = 5 * 60 * 1000;
 setInterval(() => {
   const { publicKey, secretKey } = getFoulardCredentials();
   if (!publicKey || !secretKey) return;
   syncFoulardFromSendit()
-    .then((res) => console.log('Sendit Foulard auto-sync (20min):', res))
+    .then((res) => console.log('Sendit Foulard auto-sync (5min):', res))
     .catch((err) => console.log('Sendit Foulard auto-sync error:', err.message));
-}, TWENTY_MINUTES_MS);
+}, FIVE_MINUTES_MS);
 
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
