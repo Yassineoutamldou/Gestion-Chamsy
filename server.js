@@ -291,6 +291,7 @@ const SENDIT_EXACT_MAP = {
   'scheduled': 'Programmé',
   'en cours de livraison': 'En cours de livraison',
   'out for delivery': 'En cours de livraison',
+  'delivering': 'En cours de livraison',
   'annule': 'Annulé',
   'annulé': 'Annulé',
   'canceled': 'Annulé',
@@ -326,7 +327,8 @@ const mapSenditStatus = (parcelOrRaw = '') => {
   if (
     key.includes('en cours de livraison') ||
     key.includes('out for delivery') ||
-    key.includes('cours de livraison')
+    key.includes('cours de livraison') ||
+    key.includes('delivering')
   ) {
     return 'En cours de livraison';
   }
