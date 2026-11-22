@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const Database = require('better-sqlite3');
+const { createClient } = require('@libsql/client');
 const path = require('path');
 require('dotenv').config();
 
@@ -30,13 +31,51 @@ const CASA_ENVIRONS = [
   'deroua'
 ];
 
-const db = new Database(path.join(__dirname, 'database.sqlite'));
-console.log('🟢 Connecté à la base de données SQLite');
+const tursoUrl = String(process.env.TURSO_DATABASE_URL || '').trim();
+const tursoToken = String(process.env.TURSO_AUTH_TOKEN || '').trim();
+const useTurso = Boolean(tursoUrl && tursoToken);
 
-const initDB = () => {
+let sqliteDb = null;
+let tursoClient = null;
+
+if (useTurso) {
+  tursoClient = createClient({
+    url: tursoUrl,
+    authToken: tursoToken
+  });
+  console.log('🟢 Connecté à Turso Cloud');
+} else {
+  const dbFilePath = process.env.DB_PATH || path.join(__dirname, 'database.sqlite');
+  sqliteDb = new Database(dbFilePath);
+  console.log('🟢 Connecté à la base de données SQLite locale');
+}
+
+const dbAll = async (sql, args = []) => {
+  if (useTurso) {
+    const res = await tursoClient.execute({ sql, args });
+    return (res.rows || []).map((r) => ({ ...r }));
+  }
+  return sqliteDb.prepare(sql).all(...args);
+};
+
+const dbGet = async (sql, args = []) => {
+  const rows = await dbAll(sql, args);
+  return rows[0] || null;
+};
+
+const dbRun = async (sql, args = []) => {
+  if (useTurso) {
+    const res = await tursoClient.execute({ sql, args });
+    return { lastInsertRowid: res.lastInsertRowid ? Number(res.lastInsertRowid) : null };
+  }
+  const info = sqliteDb.prepare(sql).run(...args);
+  return { lastInsertRowid: info.lastInsertRowid };
+};
+
+const initDB = async () => {
   try {
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS products (
+    const createStatements = [
+      `CREATE TABLE IF NOT EXISTS products (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL,
         client TEXT DEFAULT '',
@@ -52,33 +91,34 @@ const initDB = () => {
         statut_livraison TEXT DEFAULT 'En attente',
         source_sendit INTEGER DEFAULT 0,
         date_saisie TEXT
-      );
-
-      CREATE TABLE IF NOT EXISTS purchases (
+      )`,
+      `CREATE TABLE IF NOT EXISTS purchases (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         category TEXT NOT NULL,
         title TEXT NOT NULL,
         amount REAL DEFAULT 0,
         status TEXT DEFAULT 'Payé',
         date_saisie TEXT
-      );
-
-      CREATE TABLE IF NOT EXISTS expenses (
+      )`,
+      `CREATE TABLE IF NOT EXISTS expenses (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         category TEXT NOT NULL,
         title TEXT NOT NULL,
         amount REAL DEFAULT 0,
         date_saisie TEXT
-      );
-
-      CREATE TABLE IF NOT EXISTS inventories (
+      )`,
+      `CREATE TABLE IF NOT EXISTS inventories (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         category TEXT NOT NULL,
         title TEXT NOT NULL,
         stock_value REAL DEFAULT 0,
         date_saisie TEXT
-      );
-    `);
+      )`
+    ];
+
+    for (const stmt of createStatements) {
+      await dbRun(stmt);
+    }
 
     const alterQueries = [
       "ALTER TABLE products ADD COLUMN client TEXT DEFAULT ''",
@@ -95,17 +135,17 @@ const initDB = () => {
 
     for (const q of alterQueries) {
       try {
-        db.exec(q);
+        await dbRun(q);
       } catch (e) {}
     }
 
-    console.log('Database SQLite ready!');
+    console.log('Database ready!');
   } catch (err) {
-    console.error('Erreur DB SQLite:', err.message);
+    console.error('Erreur initialisation DB:', err.message);
   }
 };
 
-initDB();
+const dbReadyPromise = initDB();
 
 const normalizeCategoryKey = (category = 'Foulard') => {
   const c = String(category)
@@ -444,28 +484,13 @@ const fetchSenditDeliveriesAllPages = async (category = 'Foulard') => {
 };
 
 const syncCategoryFromSendit = async (category = 'Foulard') => {
+  await dbReadyPromise;
   const targetCategory = normalizeCategoryKey(category);
   const allParcels = await fetchSenditDeliveriesAllPages(targetCategory);
   const novParcels = allParcels.filter(isSinceNov1_2026);
 
   let insertedCount = 0;
   let updatedCount = 0;
-
-  const findRow = db.prepare(
-    'SELECT id, client, city, prix_achat, prix_vente, frais_livraison_unit, statut_livraison, date_saisie FROM products WHERE tracking_code = ? AND category = ?'
-  );
-
-  const insertRow = db.prepare(`
-    INSERT INTO products
-    (name, client, city, tracking_code, category, stock, sold_count, prix_achat, prix_vente, frais_livraison_unit, statut, statut_livraison, source_sendit, date_saisie)
-    VALUES (?, ?, ?, ?, ?, 1, 0, ?, ?, ?, ?, ?, 1, ?)
-  `);
-
-  const updateRow = db.prepare(`
-    UPDATE products
-    SET client = ?, city = ?, prix_vente = ?, frais_livraison_unit = ?, statut_livraison = ?, source_sendit = 1, date_saisie = ?
-    WHERE id = ?
-  `);
 
   for (const p of novParcels) {
     const code = String(p.code || p.tracking_code || p.reference || '').trim();
@@ -485,20 +510,29 @@ const syncCategoryFromSendit = async (category = 'Foulard') => {
       ? dt.toISOString().slice(0, 10)
       : new Date().toISOString().slice(0, 10);
 
-    const existing = findRow.get(code, targetCategory);
+    const existing = await dbGet(
+      'SELECT id, client, city, prix_achat, prix_vente, frais_livraison_unit, statut_livraison, date_saisie FROM products WHERE tracking_code = ? AND category = ?',
+      [code, targetCategory]
+    );
+
     if (!existing) {
-      insertRow.run(
-        `Colis ${code}`,
-        clientStr,
-        displayCity,
-        code,
-        targetCategory,
-        0,
-        salePrice,
-        fee,
-        statusLabel,
-        statusLabel,
-        dateStr
+      await dbRun(
+        `INSERT INTO products
+        (name, client, city, tracking_code, category, stock, sold_count, prix_achat, prix_vente, frais_livraison_unit, statut, statut_livraison, source_sendit, date_saisie)
+        VALUES (?, ?, ?, ?, ?, 1, 0, ?, ?, ?, ?, ?, 1, ?)`,
+        [
+          `Colis ${code}`,
+          clientStr,
+          displayCity,
+          code,
+          targetCategory,
+          0,
+          salePrice,
+          fee,
+          statusLabel,
+          statusLabel,
+          dateStr
+        ]
       );
       insertedCount += 1;
     } else {
@@ -511,14 +545,11 @@ const syncCategoryFromSendit = async (category = 'Foulard') => {
         (existing.date_saisie || '') !== dateStr;
 
       if (hasChanged) {
-        updateRow.run(
-          clientStr,
-          displayCity,
-          salePrice,
-          fee,
-          statusLabel,
-          dateStr,
-          existing.id
+        await dbRun(
+          `UPDATE products
+          SET client = ?, city = ?, prix_vente = ?, frais_livraison_unit = ?, statut_livraison = ?, source_sendit = 1, date_saisie = ?
+          WHERE id = ?`,
+          [clientStr, displayCity, salePrice, fee, statusLabel, dateStr, existing.id]
         );
         updatedCount += 1;
       }
@@ -537,6 +568,7 @@ const syncCategoryFromSendit = async (category = 'Foulard') => {
 
 // --- META ADS SYNC (Foulard uniquement — jamais Vêtement) ---
 const syncFoulardMetaAds = async (monthParam = '') => {
+  await dbReadyPromise;
   const accessToken = String(process.env.META_ACCESS_TOKEN || '').trim();
   const rawAccountId = String(process.env.META_AD_ACCOUNT_ID_FOULARD || '').trim();
   const usdToMad = Number(process.env.META_USD_TO_MAD) || 10;
@@ -578,20 +610,22 @@ const syncFoulardMetaAds = async (monthParam = '') => {
   const title = `Meta Ads Foulard (${targetMonth})`;
   const entryDate = `${targetMonth}-01`;
 
-  const existingExpense = db
-    .prepare('SELECT id FROM expenses WHERE category = ? AND title = ?')
-    .get('Foulard', title);
+  const existingExpense = await dbGet(
+    'SELECT id FROM expenses WHERE category = ? AND title = ?',
+    ['Foulard', title]
+  );
 
   if (existingExpense) {
-    db.prepare('UPDATE expenses SET amount = ?, date_saisie = ? WHERE id = ?').run(
+    await dbRun('UPDATE expenses SET amount = ?, date_saisie = ? WHERE id = ?', [
       spendMad,
       entryDate,
       existingExpense.id
-    );
+    ]);
   } else {
-    db.prepare(
-      'INSERT INTO expenses (category, title, amount, date_saisie) VALUES (?, ?, ?, ?)'
-    ).run('Foulard', title, spendMad, entryDate);
+    await dbRun(
+      'INSERT INTO expenses (category, title, amount, date_saisie) VALUES (?, ?, ?, ?)',
+      ['Foulard', title, spendMad, entryDate]
+    );
   }
 
   return {
@@ -650,8 +684,9 @@ app.post('/api/sync-sendit', handleSyncSendit);
 app.get('/api/sync-sendit', handleSyncSendit);
 
 // --- WEBHOOK SENDIT ---
-app.post('/api/webhook/sendit', (req, res) => {
+app.post('/api/webhook/sendit', async (req, res) => {
   try {
+    await dbReadyPromise;
     const payload = req.body || {};
     const p = payload.data || payload.parcel || payload.delivery || payload;
     const code = String(p.code || p.tracking_code || p.reference || '').trim();
@@ -662,17 +697,19 @@ app.post('/api/webhook/sendit', (req, res) => {
 
     if (code && statusLabel) {
       if (targetCategory) {
-        db.prepare(`
-          UPDATE products
+        await dbRun(
+          `UPDATE products
           SET statut_livraison = ?
-          WHERE tracking_code = ? AND category = ?
-        `).run(statusLabel, code, targetCategory);
+          WHERE tracking_code = ? AND category = ?`,
+          [statusLabel, code, targetCategory]
+        );
       } else {
-        db.prepare(`
-          UPDATE products
+        await dbRun(
+          `UPDATE products
           SET statut_livraison = ?
-          WHERE tracking_code = ?
-        `).run(statusLabel, code);
+          WHERE tracking_code = ?`,
+          [statusLabel, code]
+        );
       }
     }
 
@@ -682,15 +719,17 @@ app.post('/api/webhook/sendit', (req, res) => {
   }
 });
 
-// --- API PRODUCTS (La date jdida l-foq, w 01/11/2026 l-t-ḥ-t) ---
-app.get('/api/products', (req, res) => {
+// --- API PRODUCTS ---
+app.get('/api/products', async (req, res) => {
   const { category } = req.query;
   try {
+    await dbReadyPromise;
     const rows = category
-      ? db
-          .prepare('SELECT * FROM products WHERE category = ? ORDER BY date_saisie DESC, id DESC')
-          .all(category)
-      : db.prepare('SELECT * FROM products ORDER BY date_saisie DESC, id DESC').all();
+      ? await dbAll(
+          'SELECT * FROM products WHERE category = ? ORDER BY date_saisie DESC, id DESC',
+          [category]
+        )
+      : await dbAll('SELECT * FROM products ORDER BY date_saisie DESC, id DESC');
     res.json(Array.isArray(rows) ? rows : []);
   } catch (err) {
     console.error('Erreur GET /api/products:', err.message);
@@ -698,7 +737,7 @@ app.get('/api/products', (req, res) => {
   }
 });
 
-app.post('/api/products', (req, res) => {
+app.post('/api/products', async (req, res) => {
   const {
     name,
     client,
@@ -715,24 +754,26 @@ app.post('/api/products', (req, res) => {
   } = req.body;
 
   try {
+    await dbReadyPromise;
     const isMagasin = category === 'Magasin';
-    const info = db.prepare(`
-      INSERT INTO products
+    const info = await dbRun(
+      `INSERT INTO products
       (name, client, city, tracking_code, category, stock, sold_count, prix_achat, prix_vente, frais_livraison_unit, statut, statut_livraison, date_saisie)
-      VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)
-    `).run(
-      name,
-      client || '',
-      city || '',
-      tracking_code || '',
-      category || 'Foulard',
-      Number(stock) || 1,
-      Number(prix_achat) || 0,
-      Number(prix_vente) || 0,
-      isMagasin ? 0 : (Number(frais_livraison_unit) ?? 35),
-      statut || 'En attente',
-      statut_livraison || (isMagasin ? 'Livré' : 'En attente'),
-      date_saisie || new Date().toISOString().slice(0, 10)
+      VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)`,
+      [
+        name,
+        client || '',
+        city || '',
+        tracking_code || '',
+        category || 'Foulard',
+        Number(stock) || 1,
+        Number(prix_achat) || 0,
+        Number(prix_vente) || 0,
+        isMagasin ? 0 : (Number(frais_livraison_unit) ?? 35),
+        statut || 'En attente',
+        statut_livraison || (isMagasin ? 'Livré' : 'En attente'),
+        date_saisie || new Date().toISOString().slice(0, 10)
+      ]
     );
     res.json({ success: true, id: info.lastInsertRowid });
   } catch (err) {
@@ -740,7 +781,7 @@ app.post('/api/products', (req, res) => {
   }
 });
 
-app.put('/api/products/:id', (req, res) => {
+app.put('/api/products/:id', async (req, res) => {
   const { id } = req.params;
   const {
     name,
@@ -758,25 +799,27 @@ app.put('/api/products/:id', (req, res) => {
   } = req.body;
 
   try {
+    await dbReadyPromise;
     const isMagasin = category === 'Magasin';
-    db.prepare(`
-      UPDATE products
+    await dbRun(
+      `UPDATE products
       SET name = ?, client = ?, city = ?, tracking_code = ?, category = ?, stock = ?, prix_achat = ?, prix_vente = ?, frais_livraison_unit = ?, statut = ?, statut_livraison = ?, date_saisie = ?
-      WHERE id = ?
-    `).run(
-      name,
-      client || '',
-      city || '',
-      tracking_code || '',
-      category,
-      Number(stock) || 1,
-      Number(prix_achat) || 0,
-      Number(prix_vente) || 0,
-      isMagasin ? 0 : (Number(frais_livraison_unit) ?? 35),
-      statut || 'En attente',
-      statut_livraison || (isMagasin ? 'Livré' : 'En attente'),
-      date_saisie || new Date().toISOString().slice(0, 10),
-      id
+      WHERE id = ?`,
+      [
+        name,
+        client || '',
+        city || '',
+        tracking_code || '',
+        category,
+        Number(stock) || 1,
+        Number(prix_achat) || 0,
+        Number(prix_vente) || 0,
+        isMagasin ? 0 : (Number(frais_livraison_unit) ?? 35),
+        statut || 'En attente',
+        statut_livraison || (isMagasin ? 'Livré' : 'En attente'),
+        date_saisie || new Date().toISOString().slice(0, 10),
+        id
+      ]
     );
     res.json({ success: true });
   } catch (err) {
@@ -784,55 +827,73 @@ app.put('/api/products/:id', (req, res) => {
   }
 });
 
-app.delete('/api/products/:id', (req, res) => {
+app.delete('/api/products/:id', async (req, res) => {
   try {
-    db.prepare('DELETE FROM products WHERE id = ?').run(req.params.id);
+    await dbReadyPromise;
+    await dbRun('DELETE FROM products WHERE id = ?', [req.params.id]);
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// --- EXPENSES (Décharges : Ads, Fournisseurs, Logement...) ---
-app.get('/api/expenses', (req, res) => {
+// --- EXPENSES ---
+app.get('/api/expenses', async (req, res) => {
   const { category } = req.query;
   try {
+    await dbReadyPromise;
     const rows = category
-      ? db.prepare('SELECT * FROM expenses WHERE category = ? ORDER BY id DESC').all(category)
-      : db.prepare('SELECT * FROM expenses ORDER BY id DESC').all();
+      ? await dbAll('SELECT * FROM expenses WHERE category = ? ORDER BY id DESC', [category])
+      : await dbAll('SELECT * FROM expenses ORDER BY id DESC');
     res.json(Array.isArray(rows) ? rows : []);
   } catch (err) {
     res.status(200).json([]);
   }
 });
 
-app.post('/api/expenses', (req, res) => {
+app.post('/api/expenses', async (req, res) => {
   const { category, title, amount, date_saisie } = req.body;
   try {
-    const info = db.prepare(
-      'INSERT INTO expenses (category, title, amount, date_saisie) VALUES (?, ?, ?, ?)'
-    ).run(category || 'Foulard', title, Number(amount) || 0, date_saisie || new Date().toISOString().slice(0, 10));
+    await dbReadyPromise;
+    const info = await dbRun(
+      'INSERT INTO expenses (category, title, amount, date_saisie) VALUES (?, ?, ?, ?)',
+      [
+        category || 'Foulard',
+        title,
+        Number(amount) || 0,
+        date_saisie || new Date().toISOString().slice(0, 10)
+      ]
+    );
     res.json({ success: true, id: info.lastInsertRowid });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.put('/api/expenses/:id', (req, res) => {
+app.put('/api/expenses/:id', async (req, res) => {
   const { category, title, amount, date_saisie } = req.body;
   try {
-    db.prepare(
-      'UPDATE expenses SET category = ?, title = ?, amount = ?, date_saisie = ? WHERE id = ?'
-    ).run(category || 'Foulard', title, Number(amount) || 0, date_saisie || new Date().toISOString().slice(0, 10), req.params.id);
+    await dbReadyPromise;
+    await dbRun(
+      'UPDATE expenses SET category = ?, title = ?, amount = ?, date_saisie = ? WHERE id = ?',
+      [
+        category || 'Foulard',
+        title,
+        Number(amount) || 0,
+        date_saisie || new Date().toISOString().slice(0, 10),
+        req.params.id
+      ]
+    );
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.delete('/api/expenses/:id', (req, res) => {
+app.delete('/api/expenses/:id', async (req, res) => {
   try {
-    db.prepare('DELETE FROM expenses WHERE id = ?').run(req.params.id);
+    await dbReadyPromise;
+    await dbRun('DELETE FROM expenses WHERE id = ?', [req.params.id]);
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -840,48 +901,65 @@ app.delete('/api/expenses/:id', (req, res) => {
 });
 
 // --- PURCHASES & INVENTORIES ---
-app.get('/api/purchases', (req, res) => {
+app.get('/api/purchases', async (req, res) => {
   const { category } = req.query;
   try {
+    await dbReadyPromise;
     const rows = category
-      ? db.prepare('SELECT * FROM purchases WHERE category = ? ORDER BY id DESC').all(category)
-      : db.prepare('SELECT * FROM purchases ORDER BY id DESC').all();
+      ? await dbAll('SELECT * FROM purchases WHERE category = ? ORDER BY id DESC', [category])
+      : await dbAll('SELECT * FROM purchases ORDER BY id DESC');
     res.json(Array.isArray(rows) ? rows : []);
   } catch (err) {
     res.status(200).json([]);
   }
 });
 
-app.post('/api/purchases', (req, res) => {
+app.post('/api/purchases', async (req, res) => {
   const { category, title, amount, status, date_saisie } = req.body;
   try {
-    const info = db.prepare(
-      'INSERT INTO purchases (category, title, amount, status, date_saisie) VALUES (?, ?, ?, ?, ?)'
-    ).run(category || 'Magasin', title, Number(amount) || 0, status || 'Payé', date_saisie || new Date().toISOString().slice(0, 10));
+    await dbReadyPromise;
+    const info = await dbRun(
+      'INSERT INTO purchases (category, title, amount, status, date_saisie) VALUES (?, ?, ?, ?, ?)',
+      [
+        category || 'Magasin',
+        title,
+        Number(amount) || 0,
+        status || 'Payé',
+        date_saisie || new Date().toISOString().slice(0, 10)
+      ]
+    );
     res.json({ success: true, id: info.lastInsertRowid });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.get('/api/inventories', (req, res) => {
+app.get('/api/inventories', async (req, res) => {
   const { category } = req.query;
   try {
+    await dbReadyPromise;
     const rows = category
-      ? db.prepare('SELECT * FROM inventories WHERE category = ? ORDER BY id DESC').all(category)
-      : db.prepare('SELECT * FROM inventories ORDER BY id DESC').all();
+      ? await dbAll('SELECT * FROM inventories WHERE category = ? ORDER BY id DESC', [category])
+      : await dbAll('SELECT * FROM inventories ORDER BY id DESC');
     res.json(Array.isArray(rows) ? rows : []);
   } catch (err) {
     res.status(200).json([]);
   }
 });
 
-app.post('/api/inventories', (req, res) => {
+app.post('/api/inventories', async (req, res) => {
   const { category, title, stock_value, date_saisie } = req.body;
   try {
-    const info = db.prepare(
-      'INSERT INTO inventories (category, title, stock_value, date_saisie) VALUES (?, ?, ?, ?)'
-    ).run(category || 'Magasin', title, Number(stock_value) || 0, date_saisie || new Date().toISOString().slice(0, 10));
+    await dbReadyPromise;
+    const info = await dbRun(
+      'INSERT INTO inventories (category, title, stock_value, date_saisie) VALUES (?, ?, ?, ?)',
+      [
+        category || 'Magasin',
+        title,
+        Number(stock_value) || 0,
+        date_saisie || new Date().toISOString().slice(0, 10)
+      ]
+    );
     res.json({ success: true, id: info.lastInsertRowid });
   } catch (err) {
     res.status(500).json({ error: err.message });
