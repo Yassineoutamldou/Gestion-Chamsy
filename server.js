@@ -147,6 +147,49 @@ const initDB = async () => {
 
 const dbReadyPromise = initDB();
 
+// --- PAGES LÉGALES POUR PUBLICATION APP META (CHAMSY_FOULARD) ---
+app.get('/privacy-policy', (req, res) => {
+  res.type('html').send(`
+    <!DOCTYPE html>
+    <html lang="fr">
+    <head><meta charset="utf-8"><title>Politique de confidentialité - CHAMSY FOULARD</title></head>
+    <body style="font-family:Arial,sans-serif;max-width:720px;margin:40px auto;line-height:1.6;">
+      <h1>Politique de confidentialité — CHAMSY FOULARD</h1>
+      <p>L'application interne <strong>CHAMSY_FOULARD</strong> est utilisée exclusivement par l'équipe de gestion de Chamsy Foulard afin de synchroniser les statistiques publicitaires Meta Ads et suivre les performances commerciales internes.</p>
+      <p>Aucune donnée personnelle d'utilisateur tiers n'est vendue, partagée ou exploitée à des fins externes.</p>
+      <p>Pour toute demande d'information ou de suppression des données : <a href="mailto:chamsyclothes@gmail.com">chamsyclothes@gmail.com</a>.</p>
+    </body>
+    </html>
+  `);
+});
+
+app.get('/terms', (req, res) => {
+  res.type('html').send(`
+    <!DOCTYPE html>
+    <html lang="fr">
+    <head><meta charset="utf-8"><title>Conditions de service - CHAMSY FOULARD</title></head>
+    <body style="font-family:Arial,sans-serif;max-width:720px;margin:40px auto;line-height:1.6;">
+      <h1>Conditions de service — CHAMSY FOULARD</h1>
+      <p>L'accès et l'utilisation de l'outil <strong>CHAMSY_FOULARD</strong> sont strictement réservés aux administrateurs autorisés de l'entreprise CHAMSY_FOULARD.</p>
+      <p>Contact : <a href="mailto:chamsyclothes@gmail.com">chamsyclothes@gmail.com</a>.</p>
+    </body>
+    </html>
+  `);
+});
+
+app.get('/data-deletion', (req, res) => {
+  res.type('html').send(`
+    <!DOCTYPE html>
+    <html lang="fr">
+    <head><meta charset="utf-8"><title>Suppression des données - CHAMSY FOULARD</title></head>
+    <body style="font-family:Arial,sans-serif;max-width:720px;margin:40px auto;line-height:1.6;">
+      <h1>Instructions de suppression des données</h1>
+      <p>Pour demander la suppression complète des données associées à l'application <strong>CHAMSY_FOULARD</strong>, veuillez envoyer un e-mail à <a href="mailto:chamsyclothes@gmail.com">chamsyclothes@gmail.com</a>. Votre demande sera traitée sous 48 heures.</p>
+    </body>
+    </html>
+  `);
+});
+
 const normalizeCategoryKey = (category = 'Foulard') => {
   const c = String(category)
     .toLowerCase()
